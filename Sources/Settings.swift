@@ -1,6 +1,21 @@
 import AppKit
 import SwiftUI
 
+// MARK: - 停靠边缘
+
+/// 贴边 dock 停靠的屏幕边缘(顶缘让给菜单栏,不提供)。
+enum DockEdge: String, CaseIterable, Identifiable {
+    case left, right, bottom
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .left: return "左缘"
+        case .right: return "右缘"
+        case .bottom: return "下缘"
+        }
+    }
+}
+
 // MARK: - 卡片可见性设置
 
 /// 哪些指标卡显示在贴边 dock 上,持久化到 UserDefaults。
@@ -32,6 +47,13 @@ final class CardSettings: ObservableObject {
         }
     }
 
+    /// dock 停靠的屏幕边缘。
+    @Published var dockEdge: DockEdge {
+        didSet {
+            UserDefaults.standard.set(dockEdge.rawValue, forKey: "dockEdge")
+        }
+    }
+
     private init() {
         if let raw = UserDefaults.standard.stringArray(forKey: "enabledCards") {
             let stored = Set(raw.compactMap(DockPanelKind.init(rawValue:)))
@@ -41,6 +63,7 @@ final class CardSettings: ObservableObject {
         }
         alwaysShown = UserDefaults.standard.bool(forKey: "deckAlwaysShown")
         hoverRevealsValue = UserDefaults.standard.object(forKey: "cardValuesOnHover") as? Bool ?? true
+        dockEdge = UserDefaults.standard.string(forKey: "dockEdge").flatMap(DockEdge.init(rawValue:)) ?? .right
     }
 
     /// 按固定顺序返回启用的卡片;没有电池硬件时电池卡永远不出现。
@@ -119,6 +142,24 @@ struct SettingsView: View {
 
             Divider()
 
+            Text("停靠边缘")
+                .font(.system(size: 13, weight: .semibold))
+
+            Picker("停靠边缘", selection: $settings.dockEdge) {
+                ForEach(DockEdge.allCases) { edge in
+                    Text(edge.label).tag(edge)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Text("小圆点与卡片停靠在哪条屏幕边缘,切换后立即生效。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
             Text("鼠标划到屏幕右下角展开卡片,点击卡片查看详情。至少保留一张卡片。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -139,7 +180,7 @@ final class SettingsWindow: NSObject {
 
     func show() {
         if window == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 250, height: 420),
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 250, height: 480),
                              styleMask: [.titled, .closable],
                              backing: .buffered, defer: false)
             w.title = "设置"

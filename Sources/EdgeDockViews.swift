@@ -38,39 +38,85 @@ struct EdgeDockRootView: View {
     @ObservedObject var store = MonitorStore.shared
     @ObservedObject var settings = CardSettings.shared
 
+    private var edge: DockEdge { dock.edge }
+
+    private var rootAlignment: Alignment {
+        switch edge {
+        case .right:  return .topTrailing
+        case .left:   return .topLeading
+        case .bottom: return .bottomTrailing
+        }
+    }
+
     var body: some View {
-        // 高度取自实时布局:面板 resize 时 AppKit 先按新尺寸排布旧视图树,
+        // 尺寸取自实时布局:面板 resize 时 AppKit 先按新尺寸排布旧视图树,
         // 缓存在 model 里的高度会有一帧是过期的。
         GeometryReader { geo in
             let h = max(1, geo.size.height)
+            let w = max(1, geo.size.width)
 
-            ZStack(alignment: .topTrailing) {
+            ZStack(alignment: rootAlignment) {
 
                 if dock.state != .rest {
                     MetricFanColumn(dock: dock, controller: controller, store: store)
-                        .padding(.top, fanTop(panelHeight: h))
+                        .padding(fanPadding(panelHeight: h, panelWidth: w))
                 }
 
-                MonitorPillView(store: store)
-                    .padding(.top, pillTop(panelHeight: h))
-                    .padding(.trailing, 1)
+                MonitorPillView(store: store, edge: edge)
+                    .padding(pillPadding(panelHeight: h, panelWidth: w))
                     .transaction { $0.animation = nil }
                     .opacity(dock.state == .rest ? 1 : 0)
                     .animation(.easeInOut(duration: 0.20).delay(dock.state == .rest ? 0.12 : 0), value: dock.state)
 
                 // 最后声明,盖住卡片列,贴屏幕边缘。
                 if let kind = dock.state.expandedKind {
-                    MetricPanelView(kind: kind, store: store,
+                    MetricPanelView(kind: kind, store: store, edge: edge,
                                     onClose: { controller.collapse() })
-                        .padding(.top, panelTop(kind: kind, panelHeight: h))
-                        .transition(.modifier(active: PanelPull(hidden: true),
-                                               identity: PanelPull(hidden: false)))
+                        .padding(panelPadding(kind: kind, panelHeight: h, panelWidth: w))
+                        .transition(.modifier(active: PanelPull(hidden: true, edge: edge),
+                                               identity: PanelPull(hidden: false, edge: edge)))
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: rootAlignment)
         }
         .animation(.spring(response: 0.30, dampingFraction: 0.9), value: dock.state != .rest)
         .animation(.snappy(duration: 0.3), value: dock.hoveredCard)
+    }
+
+    /// 面板生长时 pill 停在屏幕原位不动:各边缘用各自的边距公式锁位。
+    private func pillPadding(panelHeight ph: CGFloat, panelWidth pw: CGFloat) -> EdgeInsets {
+        switch edge {
+        case .right:
+            return EdgeInsets(top: pillTop(panelHeight: ph), leading: 0, bottom: 0, trailing: 1)
+        case .left:
+            return EdgeInsets(top: pillTop(panelHeight: ph), leading: 1, bottom: 0, trailing: 0)
+        case .bottom:
+            let trailing = max(1, pw - DockGeom.pillBottomMargin - DockGeom.horizontalPillSize.width)
+            return EdgeInsets(top: 0, leading: 0, bottom: 1, trailing: trailing)
+        }
+    }
+
+    private func fanPadding(panelHeight ph: CGFloat, panelWidth pw: CGFloat) -> EdgeInsets {
+        switch edge {
+        case .right, .left:
+            return EdgeInsets(top: fanTop(panelHeight: ph), leading: 0, bottom: 0, trailing: 0)
+        case .bottom:
+            // 卡片一排站在右下角的底边上。
+            return EdgeInsets(top: 0, leading: 0, bottom: 2, trailing: 12)
+        }
+    }
+
+    /// 详情面板的定位:左右缘垂直居中于卡片列,下缘从卡片排上方顶出
+    /// (贴边卡片条的留位由面板内部自己处理)。
+    private func panelPadding(kind: DockPanelKind, panelHeight ph: CGFloat,
+                              panelWidth pw: CGFloat) -> EdgeInsets {
+        switch edge {
+        case .right, .left:
+            return EdgeInsets(top: panelTop(kind: kind, panelHeight: ph), leading: 0,
+                              bottom: 0, trailing: 0)
+        case .bottom:
+            return EdgeInsets()
+        }
     }
 
     /// 面板全高时 pill 仍落在右下角的屏幕位置上:面板在它周围长大、
@@ -110,24 +156,42 @@ struct EdgeDockRootView: View {
 
 struct MonitorPillView: View {
     @ObservedObject var store: MonitorStore
+    var edge: DockEdge = .right
 
     var body: some View {
-        VStack(spacing: DockGeom.dashGap) {
-            ForEach(EdgeDockCards.cards) { kind in
-                dash(kind.palette.dash)
+        pillContent
+            .frame(width: edge == .bottom ? nil : DockGeom.pillWidth,
+                   height: edge == .bottom ? DockGeom.horizontalPillSize.height : nil)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.black.opacity(0.55))
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous).fill(.ultraThinMaterial)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .shadow(color: .black.opacity(0.22), radius: 6,
+                            x: edge == .left ? 2 : -2, y: 1)
+            )
+    }
+
+    /// 左右缘彩条竖叠,下缘横躺并排。
+    @ViewBuilder
+    private var pillContent: some View {
+        if edge == .bottom {
+            HStack(spacing: DockGeom.dashGap) {
+                ForEach(EdgeDockCards.cards) { kind in
+                    dash(kind.palette.dash)
+                }
             }
+            .padding(.horizontal, DockGeom.pillPad)
+        } else {
+            VStack(spacing: DockGeom.dashGap) {
+                ForEach(EdgeDockCards.cards) { kind in
+                    dash(kind.palette.dash)
+                }
+            }
+            .padding(.vertical, DockGeom.pillPad)
         }
-        .padding(.vertical, DockGeom.pillPad)
-        .frame(width: DockGeom.pillWidth)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.black.opacity(0.55))
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous).fill(.ultraThinMaterial)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .shadow(color: .black.opacity(0.22), radius: 6, x: -2, y: 1)
-        )
     }
 
     private func dash(_ color: Color) -> some View {
@@ -148,10 +212,6 @@ struct MetricFanColumn: View {
     @State private var appeared = false
 
     private var isRevealed: Bool { dock.state != .rest && appeared }
-
-    private func value(for kind: DockPanelKind) -> String {
-        CardMetrics.value(for: kind, store: store)
-    }
 
     private var valuesById: [DockPanelKind: String] {
         Dictionary(uniqueKeysWithValues: EdgeDockCards.cards.map {
@@ -174,51 +234,31 @@ struct MetricFanColumn: View {
         CardMetrics.totalHeight(values: displayValues)
     }
 
+    /// 下缘整排的总宽(卡片宽度恒定,叠压量相同)。
+    private var rowWidth: CGFloat {
+        let n = CGFloat(EdgeDockCards.cards.count)
+        return n * DockGeom.tabWidth - max(0, n - 1) * DockGeom.tabLap
+    }
+
     /// 数值显隐完全由 displayValues 决定;click 仍开详情面板,不变。
     private func tab(item: (kind: DockPanelKind, y: CGFloat, height: CGFloat), index: Int) -> some View {
         MetricTab(title: item.kind.rawValue,
                   value: displayValues[item.kind] ?? "",
                   palette: item.kind.palette,
                   isOpen: dock.state.expandedKind == item.kind,
+                  edge: dock.edge,
                   height: item.height,
                   strip: item.height,
                   action: { controller.toggle(item.kind) })
     }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            // 叠压 = 显式 y 偏移(高度为布局引擎实测值)。
-            // 不用 VStack 负间距:它对带 rotationEffect 的不定高子视图会算错总高。
-            ForEach(Array(layouts.enumerated()), id: \.element.kind.id) { idx, item in
-                tab(item: item, index: idx)
-                    // onHover 必须贴在卡片本体上(padding 之前):padding 的透明区域
-                    // 也是命中区,而最后一张卡的 padding 覆盖整列,挂外面会全部命中它。
-                    .onHover { entering in
-                        // 只清掉自己的 hover:跨卡移动时 exit 事件可能晚于下一张的 enter。
-                        if entering {
-                            dock.hoveredCard = item.kind
-                        } else if dock.hoveredCard == item.kind {
-                            dock.hoveredCard = nil
-                        }
-                    }
-                    .padding(.top, item.y)
-                    .staged(index: idx, total: EdgeDockCards.cards.count + 1,
-                            revealed: isRevealed, onRight: true)
+        Group {
+            if dock.edge == .bottom {
+                bottomColumn
+            } else {
+                verticalColumn
             }
-
-            CogButton { SettingsWindow.shared.show() }
-                .padding(.top, totalHeight + 4)
-                .staged(index: EdgeDockCards.cards.count,
-                        total: EdgeDockCards.cards.count + 1,
-                        revealed: isRevealed, onRight: true)
-
-            // dock 悬挂其上的虚线,就在屏幕边缘上。
-            EdgeLine()
-                .stroke(style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
-                .foregroundStyle(Color.white.opacity(0.35))
-                .frame(width: 1, height: totalHeight + DockGeom.cogSize + 22)
-                .padding(.trailing, 3)
-                .allowsHitTesting(false)
         }
         .animation(.snappy(duration: 0.3), value: dock.hoveredCard)
         .animation(.snappy(duration: 0.3), value: layouts.map { $0.height })
@@ -235,6 +275,76 @@ struct MetricFanColumn: View {
                 dock.hoveredCard = nil   // 收起后下次展开不带旧的 hover 态
             }
         }
+    }
+
+    /// 左右缘:卡片竖排叠压,显式 y 偏移定位(不用 VStack 负间距——
+    /// 它对带 rotationEffect 的不定高子视图会算错总高)。
+    private var verticalColumn: some View {
+        ZStack(alignment: dock.edge == .left ? .topLeading : .topTrailing) {
+            ForEach(Array(layouts.enumerated()), id: \.element.kind.id) { idx, item in
+                placedTab(item: item, index: idx)
+                    .padding(.top, item.y)
+            }
+
+            CogButton { SettingsWindow.shared.show() }
+                .padding(.top, totalHeight + 4)
+                .staged(index: EdgeDockCards.cards.count,
+                        total: EdgeDockCards.cards.count + 1,
+                        revealed: isRevealed, edge: dock.edge)
+
+            // dock 悬挂其上的虚线,就在屏幕边缘上。
+            EdgeLine()
+                .stroke(style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                .foregroundStyle(Color.white.opacity(0.35))
+                .frame(width: 1, height: totalHeight + DockGeom.cogSize + 22)
+                .padding(dock.edge == .left ? .leading : .trailing, 3)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// 下缘:卡片横向并排,一起站在底边上。注意必须用 trailing 定位——
+    /// bottomTrailing 对齐下 leading padding 会被透明占位吃掉,卡片全叠在一处。
+    /// 顺序与竖排镜像:CPU 在最左,齿轮贴角(进程)之后,与 pill 相邻。
+    private var bottomColumn: some View {
+        ZStack(alignment: .bottomTrailing) {
+            ForEach(Array(layouts.enumerated()), id: \.element.kind.id) { idx, item in
+                placedTab(item: item, index: idx)
+                    .padding(.trailing,
+                             DockGeom.cogSize + DockGeom.cogGap + 4
+                                 + CGFloat(EdgeDockCards.cards.count - 1 - idx)
+                                     * (DockGeom.tabWidth - DockGeom.tabLap))
+            }
+
+            CogButton { SettingsWindow.shared.show() }
+                .padding(.trailing, 4)
+                .staged(index: EdgeDockCards.cards.count,
+                        total: EdgeDockCards.cards.count + 1,
+                        revealed: isRevealed, edge: dock.edge)
+
+            EdgeLine()
+                .stroke(style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                .foregroundStyle(Color.white.opacity(0.35))
+                .frame(width: rowWidth + DockGeom.cogSize + 22, height: 1)
+                .padding(.bottom, 3)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// onHover 必须贴在卡片本体上(定位 padding 之前):padding 的透明
+    /// 区域也是命中区,挂外面会串卡。
+    private func placedTab(item: (kind: DockPanelKind, y: CGFloat, height: CGFloat),
+                           index: Int) -> some View {
+        tab(item: item, index: index)
+            .onHover { entering in
+                // 只清掉自己的 hover:跨卡移动时 exit 事件可能晚于下一张的 enter。
+                if entering {
+                    dock.hoveredCard = item.kind
+                } else if dock.hoveredCard == item.kind {
+                    dock.hoveredCard = nil
+                }
+            }
+            .staged(index: index, total: EdgeDockCards.cards.count + 1,
+                    revealed: isRevealed, edge: dock.edge)
     }
 }
 
@@ -332,31 +442,48 @@ enum CardMetrics {
 
 // MARK: - Tab(一张指标卡,noty 原版形态)
 
-/// 竖纸条卡:实心彩纸 + 柔和投影 + 统一 3° 倾角,纸面高度由内容自然决定。
+/// 竖纸条卡:实心彩纸 + 柔和投影。左右缘统一 3° 倾角并向外多画 bleed
+/// 防倾斜露缝;下缘不倾斜直立站排。
 struct MetricTab: View {
     let title: String
     let value: String
     let palette: MetricColor
     let isOpen: Bool
+    let edge: DockEdge
     let height: CGFloat       // 纸面高度 = CardMetrics 实测内容高度
     let strip: CGFloat
     let action: () -> Void
 
+    private var leanDegrees: Double {
+        switch edge {
+        case .right:  return -DockGeom.leanDegrees
+        case .left:   return DockGeom.leanDegrees
+        case .bottom: return 0
+        }
+    }
+
     var body: some View {
         Button(action: action) {
             ZStack(alignment: .top) {
-                edgeTabShape(onRight: true)
+                edgeTabShape(for: edge)
                     .fill(palette.paper)
                     .shadow(color: .black.opacity(isOpen ? 0.32 : 0.22),
-                            radius: isOpen ? 10 : 6, x: -3, y: 2)
+                            radius: isOpen ? 10 : 6,
+                            x: edge == .left ? 3 : (edge == .bottom ? 0 : -3),
+                            y: edge == .bottom ? 4 : 2)
                 VerticalMetricLabel(title: title, value: value,
                                     strip: strip, palette: palette)
-                    .offset(x: -DockGeom.bleed / 2)
+                    .offset(x: edge == .right ? -DockGeom.bleed / 2
+                                : edge == .left ? DockGeom.bleed / 2 : 0)
             }
-            .frame(width: DockGeom.tabWidth + DockGeom.bleed, height: height, alignment: .top)
-            .rotationEffect(.degrees(-DockGeom.leanDegrees), anchor: .trailing)
-            .offset(x: DockGeom.bleed)
-            .frame(width: DockGeom.tabWidth)
+            .frame(width: DockGeom.tabWidth + (edge == .bottom ? 0 : DockGeom.bleed),
+                   height: height, alignment: .top)
+            .rotationEffect(.degrees(leanDegrees),
+                            anchor: edge == .left ? .leading : .trailing)
+            .offset(x: edge == .bottom ? 0
+                        : (edge == .left ? -DockGeom.bleed : DockGeom.bleed))
+            .frame(width: DockGeom.tabWidth,
+                   height: edge == .bottom ? height : nil, alignment: .top)
             .contentShape(Rectangle())
         }
         .buttonStyle(TabPressStyle())
@@ -489,6 +616,7 @@ struct CogButton: View {
 struct MetricPanelView: View {
     let kind: DockPanelKind
     @ObservedObject var store: MonitorStore
+    var edge: DockEdge = .right
     let onClose: () -> Void
 
     var body: some View {
@@ -560,10 +688,19 @@ struct MetricPanelView: View {
             // 四角全圆的彩纸面板。
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(kind.palette.paper)
-                .shadow(color: .black.opacity(0.30), radius: 16, x: -5, y: 4)
+                .shadow(color: .black.opacity(0.30), radius: 16,
+                        x: edge == .left ? 5 : -5, y: 4)
         )
-        // 放在卡片列左侧并排拉出,不盖住 hover 展开的标签条。
-        .padding(.trailing, DockGeom.tabWidth)
+        // 背向停靠边缘让出贴边卡片条的位置,不盖住展开的标签条。
+        .padding(panelInset)
+    }
+
+    private var panelInset: EdgeInsets {
+        switch edge {
+        case .right:  return EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: DockGeom.tabWidth)
+        case .left:   return EdgeInsets(top: 0, leading: DockGeom.tabWidth, bottom: 0, trailing: 0)
+        case .bottom: return EdgeInsets(top: 0, leading: 0, bottom: DockGeom.tabWidth, trailing: 0)
+        }
     }
 
     private var header: some View {
@@ -657,11 +794,19 @@ struct MetricPanelView: View {
 /// 详情面板从边缘滑出:长滑动 + 锚定边缘的缩放 + 淡入,由状态机里的弹簧驱动。
 struct PanelPull: ViewModifier {
     let hidden: Bool
+    var edge: DockEdge = .right
 
     func body(content: Content) -> some View {
-        content
-            .offset(x: hidden ? 56 : 0)
-            .scaleEffect(hidden ? 0.94 : 1, anchor: .trailing)
+        let anchor: UnitPoint
+        let offset: CGSize
+        switch edge {
+        case .right:  anchor = .trailing; offset = CGSize(width: 56, height: 0)
+        case .left:   anchor = .leading;  offset = CGSize(width: -56, height: 0)
+        case .bottom: anchor = .bottom;   offset = CGSize(width: 0, height: 56)
+        }
+        return content
+            .offset(x: hidden ? offset.width : 0, y: hidden ? offset.height : 0)
+            .scaleEffect(hidden ? 0.94 : 1, anchor: anchor)
             .opacity(hidden ? 0 : 1)
     }
 }
@@ -865,14 +1010,22 @@ struct StatRows: View {
 
 // MARK: - Shared bits
 
-/// 只在外侧圆角,卡片读作"停靠在边缘上"。
-func edgeTabShape(onRight: Bool, radius r: CGFloat = 11) -> UnevenRoundedRectangle {
-    UnevenRoundedRectangle(
-        topLeadingRadius: onRight ? r : 0,
-        bottomLeadingRadius: onRight ? r : 0,
-        bottomTrailingRadius: onRight ? 0 : r,
-        topTrailingRadius: onRight ? 0 : r,
-        style: .continuous)
+/// 只在外侧圆角,卡片读作"停靠在边缘上"(右缘圆左侧、左缘圆右侧、下缘圆顶部)。
+func edgeTabShape(for edge: DockEdge, radius r: CGFloat = 11) -> UnevenRoundedRectangle {
+    switch edge {
+    case .right:
+        return UnevenRoundedRectangle(topLeadingRadius: r, bottomLeadingRadius: r,
+                                      bottomTrailingRadius: 0, topTrailingRadius: 0,
+                                      style: .continuous)
+    case .left:
+        return UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0,
+                                      bottomTrailingRadius: r, topTrailingRadius: r,
+                                      style: .continuous)
+    case .bottom:
+        return UnevenRoundedRectangle(topLeadingRadius: r, bottomLeadingRadius: 0,
+                                      bottomTrailingRadius: 0, topTrailingRadius: r,
+                                      style: .continuous)
+    }
 }
 
 struct EdgeLine: Shape {
@@ -889,14 +1042,21 @@ private struct Staged: ViewModifier {
     let index: Int
     let totalCount: Int
     let revealed: Bool
-    let onRight: Bool
+    let edge: DockEdge
 
     func body(content: Content) -> some View {
         let delay = revealed
             ? Double(index) * 0.042
             : Double(max(0, totalCount - 1 - index)) * 0.030
-        content
-            .offset(x: revealed ? 0 : (onRight ? DockGeom.tabWidth + 24 : -(DockGeom.tabWidth + 24)))
+        let hiddenOffset: CGSize
+        switch edge {
+        case .right:  hiddenOffset = CGSize(width: DockGeom.tabWidth + 24, height: 0)
+        case .left:   hiddenOffset = CGSize(width: -(DockGeom.tabWidth + 24), height: 0)
+        case .bottom: hiddenOffset = CGSize(width: 0, height: DockGeom.tabWidth + 24)
+        }
+        return content
+            .offset(x: revealed ? 0 : hiddenOffset.width,
+                    y: revealed ? 0 : hiddenOffset.height)
             .opacity(revealed ? 1 : 0)
             .animation(.spring(response: 0.34, dampingFraction: 0.76)
                         .delay(delay), value: revealed)
@@ -904,8 +1064,8 @@ private struct Staged: ViewModifier {
 }
 
 private extension View {
-    func staged(index: Int, total: Int = 1, revealed: Bool, onRight: Bool) -> some View {
-        modifier(Staged(index: index, totalCount: total, revealed: revealed, onRight: onRight))
+    func staged(index: Int, total: Int = 1, revealed: Bool, edge: DockEdge) -> some View {
+        modifier(Staged(index: index, totalCount: total, revealed: revealed, edge: edge))
     }
 }
 

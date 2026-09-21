@@ -35,10 +35,13 @@ enum EdgeDockState: Equatable {
 
 final class EdgeDockModel: ObservableObject {
     @Published var state: EdgeDockState = .rest
+    @Published var edge: DockEdge
     /// hover 的那张卡:拉高并把具体数值亮出来(hover,不是 click;click 仍开详情面板)。
     @Published var hoveredCard: DockPanelKind?
     @Published var revealTick = 0       // bumped to restage the fan animation
     @Published var fanHeight: CGFloat = 0   // 卡片列实测自然高度
+
+    init(edge: DockEdge) { self.edge = edge }
 }
 
 // MARK: - Geometry
@@ -67,6 +70,13 @@ enum DockGeom {
     static let leanDegrees: Double = 3.0
     /// pill 停靠在右下角,避开原版 noty 在右边缘中部的默认位置。
     static let pillBottomMargin: CGFloat = 16
+
+    /// 下缘停靠:pill 横躺,彩条并排成一排。
+    static var horizontalPillSize: CGSize {
+        let n = CGFloat(EdgeDockCards.cards.count)
+        return CGSize(width: pillPad * 2 + n * dashWidth + max(0, n - 1) * dashGap,
+                      height: dashHeight + pillPad * 2)
+    }
 
     // Expanded — 拉出的详情面板
     static let expandedWidth: CGFloat = 332
@@ -162,7 +172,7 @@ final class EdgeDockHostingView<Content: View>: NSHostingView<Content> {
 /// 每块屏一个贴边 dock(机制同 noty 的 DeckController,按 CGDirectDisplayID 索引)。
 final class EdgeDockController: NSObject {
     let displayID: CGDirectDisplayID
-    let model = EdgeDockModel()
+    let model: EdgeDockModel
 
     private let panel = EdgeDockPanel()
     private var hosting: EdgeDockHostingView<EdgeDockRootView>!
@@ -188,6 +198,7 @@ final class EdgeDockController: NSObject {
 
     init(displayID: CGDirectDisplayID) {
         self.displayID = displayID
+        self.model = EdgeDockModel(edge: CardSettings.shared.dockEdge)
         super.init()
 
         container = EdgeDockContentView()
@@ -218,6 +229,15 @@ final class EdgeDockController: NSObject {
         }
     }
 
+    /// 切换停靠边缘:先收回静止态,再换向重排(SwiftUI 侧随 model.edge 换向)。
+    func applyEdge(_ edge: DockEdge) {
+        guard edge != model.edge else { return }
+        model.hoveredCard = nil
+        setState(restingState)
+        model.edge = edge
+        layout()
+    }
+
     deinit {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor) }
@@ -235,21 +255,52 @@ final class EdgeDockController: NSObject {
         let vis = screen.visibleFrame
 
         let frame: NSRect
+        switch model.edge {
+        case .right:
+            frame = verticalFrame(state, full: full, vis: vis, fromRight: true)
+        case .left:
+            frame = verticalFrame(state, full: full, vis: vis, fromRight: false)
+        case .bottom:
+            frame = bottomFrame(state, full: full, vis: vis)
+        }
+        panel.setFrame(frame, display: true, animate: false)
+    }
+
+    /// 左右两缘:面板是一条贴边全高窄条,只有停靠方向不同。
+    private func verticalFrame(_ state: EdgeDockState, full: NSRect, vis: NSRect,
+                               fromRight: Bool) -> NSRect {
         switch state {
         case .rest:
             // 静止的面板本身就是贴边检测条:pill 画在边缘,其余部分透明、可穿透。
-            let h = DockGeom.pillHeight
-            let w = DockGeom.pillWidth
-            let y = vis.minY + DockGeom.pillBottomMargin
-            frame = NSRect(x: full.maxX - w, y: round(y), width: w, height: h)
+            let x = fromRight ? full.maxX - DockGeom.pillWidth : full.minX
+            return NSRect(x: x, y: round(vis.minY + DockGeom.pillBottomMargin),
+                          width: DockGeom.pillWidth, height: DockGeom.pillHeight)
         case .fan:
             let w = DockGeom.expandedWidth
-            frame = NSRect(x: full.maxX - w, y: vis.minY, width: w, height: vis.height)
+            return NSRect(x: fromRight ? full.maxX - w : full.minX,
+                          y: vis.minY, width: w, height: vis.height)
         case .expanded(let kind):
             let w = DockGeom.tabWidth + DockGeom.panelWidth(kind)
-            frame = NSRect(x: full.maxX - w, y: vis.minY, width: w, height: vis.height)
+            return NSRect(x: fromRight ? full.maxX - w : full.minX,
+                          y: vis.minY, width: w, height: vis.height)
         }
-        panel.setFrame(frame, display: true, animate: false)
+    }
+
+    /// 下缘:pill/卡片横躺成一排,面板锚在右下角向左、向上生长。
+    private func bottomFrame(_ state: EdgeDockState, full: NSRect, vis: NSRect) -> NSRect {
+        switch state {
+        case .rest:
+            let size = DockGeom.horizontalPillSize
+            return NSRect(x: full.maxX - size.width - DockGeom.pillBottomMargin,
+                          y: vis.minY, width: size.width, height: size.height)
+        case .fan:
+            let side = DockGeom.expandedWidth
+            return NSRect(x: full.maxX - side, y: vis.minY, width: side, height: side)
+        case .expanded(let kind):
+            let w = DockGeom.panelWidth(kind) + DockGeom.tabWidth
+            let h = DockGeom.tabWidth + DockGeom.panelHeight(kind)
+            return NSRect(x: full.maxX - w, y: vis.minY, width: w, height: h)
+        }
     }
 
     // MARK: Transitions
@@ -327,8 +378,15 @@ final class EdgeDockController: NSObject {
     /// dock 实际占据的贴边窄条,"离开 dock" 以它为准。
     private var hotZone: NSRect {
         let f = panel.frame
-        let w = DockGeom.fanWidth + 20
-        return NSRect(x: f.maxX - w, y: f.minY, width: w, height: f.height)
+        let depth = DockGeom.fanWidth + 20
+        switch model.edge {
+        case .right:
+            return NSRect(x: f.maxX - depth, y: f.minY, width: depth, height: f.height)
+        case .left:
+            return NSRect(x: f.minX, y: f.minY, width: depth, height: f.height)
+        case .bottom:
+            return NSRect(x: f.minX, y: f.minY, width: f.width, height: depth)
+        }
     }
 
     func pointerEntered() {
@@ -456,6 +514,12 @@ final class EdgeDockManager {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.docks.values.forEach { $0.applyRestingState() }
+            }
+            .store(in: &bag)
+        CardSettings.shared.$dockEdge
+            .receive(on: RunLoop.main)
+            .sink { [weak self] edge in
+                self?.docks.values.forEach { $0.applyEdge(edge) }
             }
             .store(in: &bag)
         rebuild()
