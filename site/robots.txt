@@ -1,4 +1,0 @@
-User-agent: *
-Allow: /
-
-Sitemap: https://noty-sepia.vercel.app/sitemap.xml
