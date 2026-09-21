@@ -92,11 +92,12 @@ struct EdgeDockRootView: View {
         case .left:
             return EdgeInsets(top: pillTop(panelHeight: ph), leading: 1, bottom: 0, trailing: 0)
         case .bottomRight:
-            let trailing = max(1, pw - DockGeom.bottomCornerInset - DockGeom.horizontalPillSize.width)
-            return EdgeInsets(top: 0, leading: 0, bottom: 1, trailing: trailing)
+            // 下角:rest/fan 面板共享同一条角落边,pill 恒贴角即可全程不挪位。
+            // 不能用随面板宽度变化的公式——收起动画的 0.45s 里面板还是
+            // 全宽,会把 pill 算到卡片排那端,弹回角落时肉眼可见地跳一下。
+            return EdgeInsets(top: 0, leading: 0, bottom: 1, trailing: 1)
         case .bottomLeft:
-            let leading = max(1, pw - DockGeom.bottomCornerInset - DockGeom.horizontalPillSize.width)
-            return EdgeInsets(top: 0, leading: leading, bottom: 1, trailing: 0)
+            return EdgeInsets(top: 0, leading: 1, bottom: 1, trailing: 0)
         }
     }
 
