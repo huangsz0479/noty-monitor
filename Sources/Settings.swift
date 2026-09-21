@@ -134,6 +134,9 @@ struct SettingsView: View {
             .toggleStyle(.checkbox)
 
             Text("开启后卡片常驻屏幕边缘,无需鼠标划过。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Divider()
 
@@ -173,7 +176,7 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(20)
-        .frame(width: 250, alignment: .leading)
+        .frame(width: 320, alignment: .leading)
     }
 }
 
@@ -187,12 +190,17 @@ final class SettingsWindow: NSObject {
 
     func show() {
         if window == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 250, height: 480),
+            // 窗口尺寸取自内容的 fittingSize:加设置项时不会放不下或留白。
+            let host = NSHostingView(rootView: SettingsView())
+            let size = host.fittingSize
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0,
+                                                 width: ceil(size.width),
+                                                 height: ceil(size.height)),
                              styleMask: [.titled, .closable],
                              backing: .buffered, defer: false)
             w.title = "设置"
             w.isReleasedWhenClosed = false
-            w.contentView = NSHostingView(rootView: SettingsView())
+            w.contentView = host
             w.center()
             window = w
         }
