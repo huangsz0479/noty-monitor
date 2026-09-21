@@ -52,9 +52,12 @@ hover 展开 6 张指标卡，点击弹出详情面板；另有右键菜单打�
   `EdgeDockViews.swift`（SwiftUI 指标卡，沿用 noty 纸色调色板，每卡专属色）。
 - **完整窗口** `MonitorView.swift` — SwiftUI Charts 曲线 + 六个标签页 +
   进程表（排序/搜索/SIGKILL 强杀）。
-- `Settings.swift` — `CardSettings`（卡片可见性、常驻展开，UserDefaults
-  持久化，key：`enabledCards` / `deckAlwaysShown`；电池有无以静态
-  `hasBattery` 只探测一次，`cards` 会被 SwiftUI 每次渲染调用）。
+- `Settings.swift` — `CardSettings`（卡片可见性、常驻展开、悬停显示数值，
+  UserDefaults 持久化，key：`enabledCards` / `deckAlwaysShown` /
+  `cardValuesOnHover`；电池有无以静态 `hasBattery` 只探测一次，`cards`
+  会被 SwiftUI 每次渲染调用）。悬停显示数值开启时，卡片只显示名称、
+  悬停哪张哪张拉高亮出数值（`CardMetrics.displayValues` 过滤），
+  关闭则数值常显。
 
 ## 关键约定
 

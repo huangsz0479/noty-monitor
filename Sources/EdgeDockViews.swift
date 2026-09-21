@@ -80,15 +80,17 @@ struct EdgeDockRootView: View {
     }
 
     private var cardValues: [DockPanelKind: String] {
-        Dictionary(uniqueKeysWithValues: EdgeDockCards.cards.map {
+        let all = Dictionary(uniqueKeysWithValues: EdgeDockCards.cards.map {
             ($0, CardMetrics.value(for: $0, store: store))
         })
+        return CardMetrics.displayValues(all, hovered: dock.hoveredCard,
+                                         hoverReveals: settings.hoverRevealsValue)
     }
 
     /// 扇形以 pill 中心为轴向上展开,但不跑出屏幕。
     private func fanTop(panelHeight h: CGFloat) -> CGFloat {
         let pillCenter = h - DockGeom.pillBottomMargin - DockGeom.pillHeight / 2
-        let stack = CardMetrics.totalHeight(values: cardValues, revealed: dock.hoveredCard)
+        let stack = CardMetrics.totalHeight(values: cardValues)
             + DockGeom.cogGap + DockGeom.cogSize
         return min(max(12, pillCenter - stack / 2), max(12, h - stack - 12))
     }
@@ -97,7 +99,7 @@ struct EdgeDockRootView: View {
     /// 稳定可预期,不再跟着被点的卡片上下飞。
     private func panelTop(kind: DockPanelKind, panelHeight h: CGFloat) -> CGFloat {
         let panelH = DockGeom.panelHeight(kind)
-        let stack = CardMetrics.totalHeight(values: cardValues, revealed: dock.hoveredCard)
+        let stack = CardMetrics.totalHeight(values: cardValues)
             + DockGeom.cogGap + DockGeom.cogSize
         let ideal = fanTop(panelHeight: h) + (stack - panelH) / 2
         return min(max(10, ideal), max(10, h - panelH - 10))
@@ -157,18 +159,25 @@ struct MetricFanColumn: View {
         })
     }
 
+    /// 卡面上实际显示的数值:由"悬停显示数值"设置决定(hover 模式下只有
+    /// 被悬停的卡带数值,其余为空 → 只显示名称、按标题高度布局)。
+    private var displayValues: [DockPanelKind: String] {
+        CardMetrics.displayValues(valuesById, hovered: dock.hoveredCard,
+                                  hoverReveals: settings.hoverRevealsValue)
+    }
+
     private var layouts: [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] {
-        CardMetrics.layouts(values: valuesById, revealed: dock.hoveredCard)
+        CardMetrics.layouts(values: displayValues)
     }
 
     private var totalHeight: CGFloat {
-        CardMetrics.totalHeight(values: valuesById, revealed: dock.hoveredCard)
+        CardMetrics.totalHeight(values: displayValues)
     }
 
-    /// 默认只显示标题;数值仅在被 hover 的卡上亮出(hover,不是 click)。
+    /// 数值显隐完全由 displayValues 决定;click 仍开详情面板,不变。
     private func tab(item: (kind: DockPanelKind, y: CGFloat, height: CGFloat), index: Int) -> some View {
         MetricTab(title: item.kind.rawValue,
-                  value: dock.hoveredCard == item.kind ? (valuesById[item.kind] ?? "") : "",
+                  value: displayValues[item.kind] ?? "",
                   palette: item.kind.palette,
                   isOpen: dock.state.expandedKind == item.kind,
                   height: item.height,
@@ -278,23 +287,29 @@ enum CardMetrics {
         return 5 + width + 12
     }
 
-    /// revealed = 正被 hover 的卡:只有它按"标题 + 数值"实测,其余只算标题高度。
-    static func layouts(values: [DockPanelKind: String],
-                        revealed: DockPanelKind? = nil) -> [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] {
+    /// 按显示模式过滤卡面数值:hover 模式只保留被悬停卡的数值(其余按纯标题
+    /// 计高、只显示名称),常显模式原样返回。
+    static func displayValues(_ values: [DockPanelKind: String], hovered: DockPanelKind?,
+                              hoverReveals: Bool) -> [DockPanelKind: String] {
+        guard hoverReveals else { return values }
+        return Dictionary(uniqueKeysWithValues: values.map { kind, value in
+            (kind, hovered == kind ? value : "")
+        })
+    }
+
+    static func layouts(values: [DockPanelKind: String]) -> [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] {
         var result: [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] = []
         var y: CGFloat = 0
         for kind in EdgeDockCards.cards {
-            let shown = revealed == kind ? (values[kind] ?? "") : ""
-            let h = measuredHeight(title: kind.rawValue, value: shown)
+            let h = measuredHeight(title: kind.rawValue, value: values[kind] ?? "")
             result.append((kind, y, h))
             y += h - DockGeom.tabLap
         }
         return result
     }
 
-    static func totalHeight(values: [DockPanelKind: String],
-                            revealed: DockPanelKind? = nil) -> CGFloat {
-        guard let last = layouts(values: values, revealed: revealed).last else { return 0 }
+    static func totalHeight(values: [DockPanelKind: String]) -> CGFloat {
+        guard let last = layouts(values: values).last else { return 0 }
         return last.y + last.height
     }
 

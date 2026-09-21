@@ -24,6 +24,14 @@ final class CardSettings: ObservableObject {
         }
     }
 
+    /// 悬停显示数值:开启后卡片只显示名称,悬停哪张哪张拉高亮出数值;
+    /// 关闭则所有卡常显数值(改版前行为)。
+    @Published var hoverRevealsValue: Bool {
+        didSet {
+            UserDefaults.standard.set(hoverRevealsValue, forKey: "cardValuesOnHover")
+        }
+    }
+
     private init() {
         if let raw = UserDefaults.standard.stringArray(forKey: "enabledCards") {
             let stored = Set(raw.compactMap(DockPanelKind.init(rawValue:)))
@@ -32,6 +40,7 @@ final class CardSettings: ObservableObject {
             enabled = Set(DockPanelKind.allCases)
         }
         alwaysShown = UserDefaults.standard.bool(forKey: "deckAlwaysShown")
+        hoverRevealsValue = UserDefaults.standard.object(forKey: "cardValuesOnHover") as? Bool ?? true
     }
 
     /// 按固定顺序返回启用的卡片;没有电池硬件时电池卡永远不出现。
@@ -98,6 +107,18 @@ struct SettingsView: View {
 
             Divider()
 
+            Toggle(isOn: $settings.hoverRevealsValue) {
+                Text("悬停显示数值")
+            }
+            .toggleStyle(.checkbox)
+
+            Text("开启后卡片只显示名称,悬停到哪张卡,哪张拉高显示具体数值;关闭则数值常显。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
             Text("鼠标划到屏幕右下角展开卡片,点击卡片查看详情。至少保留一张卡片。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -118,7 +139,7 @@ final class SettingsWindow: NSObject {
 
     func show() {
         if window == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 250, height: 300),
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 250, height: 420),
                              styleMask: [.titled, .closable],
                              backing: .buffered, defer: false)
             w.title = "设置"
