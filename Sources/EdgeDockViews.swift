@@ -42,9 +42,10 @@ struct EdgeDockRootView: View {
 
     private var rootAlignment: Alignment {
         switch edge {
-        case .right:  return .topTrailing
-        case .left:   return .topLeading
-        case .bottom: return .bottomTrailing
+        case .right:       return .topTrailing
+        case .left:        return .topLeading
+        case .bottomRight: return .bottomTrailing
+        case .bottomLeft:  return .bottomLeading
         }
     }
 
@@ -90,9 +91,12 @@ struct EdgeDockRootView: View {
             return EdgeInsets(top: pillTop(panelHeight: ph), leading: 0, bottom: 0, trailing: 1)
         case .left:
             return EdgeInsets(top: pillTop(panelHeight: ph), leading: 1, bottom: 0, trailing: 0)
-        case .bottom:
+        case .bottomRight:
             let trailing = max(1, pw - DockGeom.bottomCornerInset - DockGeom.horizontalPillSize.width)
             return EdgeInsets(top: 0, leading: 0, bottom: 1, trailing: trailing)
+        case .bottomLeft:
+            let leading = max(1, pw - DockGeom.bottomCornerInset - DockGeom.horizontalPillSize.width)
+            return EdgeInsets(top: 0, leading: leading, bottom: 1, trailing: 0)
         }
     }
 
@@ -100,9 +104,12 @@ struct EdgeDockRootView: View {
         switch edge {
         case .right, .left:
             return EdgeInsets(top: fanTop(panelHeight: ph), leading: 0, bottom: 0, trailing: 0)
-        case .bottom:
+        case .bottomRight:
             // 卡片一排贴着右下角站在底边上。
             return EdgeInsets(top: 0, leading: 0, bottom: 2, trailing: DockGeom.bottomCornerInset)
+        case .bottomLeft:
+            // 镜像:贴着左下角。
+            return EdgeInsets(top: 0, leading: DockGeom.bottomCornerInset, bottom: 2, trailing: 0)
         }
     }
 
@@ -114,7 +121,7 @@ struct EdgeDockRootView: View {
         case .right, .left:
             return EdgeInsets(top: panelTop(kind: kind, panelHeight: ph), leading: 0,
                               bottom: 0, trailing: 0)
-        case .bottom:
+        case .bottomLeft, .bottomRight:
             return EdgeInsets()
         }
     }
@@ -160,8 +167,8 @@ struct MonitorPillView: View {
 
     var body: some View {
         pillContent
-            .frame(width: edge == .bottom ? nil : DockGeom.pillWidth,
-                   height: edge == .bottom ? DockGeom.horizontalPillSize.height : nil)
+            .frame(width: edge.isBottom ? nil : DockGeom.pillWidth,
+                   height: edge.isBottom ? DockGeom.horizontalPillSize.height : nil)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(Color.black.opacity(0.55))
@@ -177,7 +184,7 @@ struct MonitorPillView: View {
     /// 左右缘彩条竖叠,下缘横躺并排。
     @ViewBuilder
     private var pillContent: some View {
-        if edge == .bottom {
+        if edge.isBottom {
             HStack(spacing: DockGeom.dashGap) {
                 ForEach(EdgeDockCards.cards) { kind in
                     dash(kind.palette.dash)
@@ -254,10 +261,13 @@ struct MetricFanColumn: View {
 
     var body: some View {
         Group {
-            if dock.edge == .bottom {
-                bottomColumn
-            } else {
+            switch dock.edge {
+            case .right, .left:
                 verticalColumn
+            case .bottomRight:
+                bottomColumn(fromRight: true)
+            case .bottomLeft:
+                bottomColumn(fromRight: false)
             }
         }
         .animation(.snappy(duration: 0.3), value: dock.hoveredCard)
@@ -302,20 +312,20 @@ struct MetricFanColumn: View {
         }
     }
 
-    /// 下缘:卡片横向并排,一起站在底边上。注意必须用 trailing 定位——
-    /// bottomTrailing 对齐下 leading padding 会被透明占位吃掉,卡片全叠在一处。
-    /// 进程贴右下角,齿轮按用户习惯放在整排最左端。
-    private var bottomColumn: some View {
-        ZStack(alignment: .bottomTrailing) {
+    /// 下角:卡片横向并排,一起站在底边上。注意定位 padding 要与对齐方向
+    /// 相反侧为空——bottomTrailing 下 leading padding 会被透明占位吃掉,
+    /// 卡片全叠在一处(bottomLeading 镜像同理)。齿轮在远离角落的一端。
+    private func bottomColumn(fromRight: Bool) -> some View {
+        ZStack(alignment: fromRight ? .bottomTrailing : .bottomLeading) {
             ForEach(Array(layouts.enumerated()), id: \.element.kind.id) { idx, item in
                 placedTab(item: item, index: idx)
-                    .padding(.trailing,
+                    .padding(fromRight ? .trailing : .leading,
                              CGFloat(EdgeDockCards.cards.count - 1 - idx)
                                  * (DockGeom.tabWidth - DockGeom.tabLap))
             }
 
             CogButton { SettingsWindow.shared.show() }
-                .padding(.trailing, rowWidth + 4)
+                .padding(fromRight ? .trailing : .leading, rowWidth + 4)
                 .staged(index: EdgeDockCards.cards.count,
                         total: EdgeDockCards.cards.count + 1,
                         revealed: isRevealed, edge: dock.edge)
@@ -457,7 +467,7 @@ struct MetricTab: View {
         switch edge {
         case .right:  return -DockGeom.leanDegrees
         case .left:   return DockGeom.leanDegrees
-        case .bottom: return 0
+        case .bottomLeft, .bottomRight: return 0
         }
     }
 
@@ -468,21 +478,21 @@ struct MetricTab: View {
                     .fill(palette.paper)
                     .shadow(color: .black.opacity(isOpen ? 0.32 : 0.22),
                             radius: isOpen ? 10 : 6,
-                            x: edge == .left ? 3 : (edge == .bottom ? 0 : -3),
-                            y: edge == .bottom ? 4 : 2)
+                            x: edge == .left ? 3 : (edge.isBottom ? 0 : -3),
+                            y: edge.isBottom ? 4 : 2)
                 VerticalMetricLabel(title: title, value: value,
                                     strip: strip, palette: palette)
                     .offset(x: edge == .right ? -DockGeom.bleed / 2
                                 : edge == .left ? DockGeom.bleed / 2 : 0)
             }
-            .frame(width: DockGeom.tabWidth + (edge == .bottom ? 0 : DockGeom.bleed),
+            .frame(width: DockGeom.tabWidth + (edge.isBottom ? 0 : DockGeom.bleed),
                    height: height, alignment: .top)
             .rotationEffect(.degrees(leanDegrees),
                             anchor: edge == .left ? .leading : .trailing)
-            .offset(x: edge == .bottom ? 0
+            .offset(x: edge.isBottom ? 0
                         : (edge == .left ? -DockGeom.bleed : DockGeom.bleed))
             .frame(width: DockGeom.tabWidth,
-                   height: edge == .bottom ? height : nil, alignment: .top)
+                   height: edge.isBottom ? height : nil, alignment: .top)
             .contentShape(Rectangle())
         }
         .buttonStyle(TabPressStyle())
@@ -698,7 +708,7 @@ struct MetricPanelView: View {
         switch edge {
         case .right:  return EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: DockGeom.tabWidth)
         case .left:   return EdgeInsets(top: 0, leading: DockGeom.tabWidth, bottom: 0, trailing: 0)
-        case .bottom: return EdgeInsets(top: 0, leading: 0, bottom: DockGeom.tabWidth, trailing: 0)
+        case .bottomLeft, .bottomRight: return EdgeInsets(top: 0, leading: 0, bottom: DockGeom.tabWidth, trailing: 0)
         }
     }
 
@@ -801,7 +811,7 @@ struct PanelPull: ViewModifier {
         switch edge {
         case .right:  anchor = .trailing; offset = CGSize(width: 56, height: 0)
         case .left:   anchor = .leading;  offset = CGSize(width: -56, height: 0)
-        case .bottom: anchor = .bottom;   offset = CGSize(width: 0, height: 56)
+        case .bottomLeft, .bottomRight: anchor = .bottom; offset = CGSize(width: 0, height: 56)
         }
         return content
             .offset(x: hidden ? offset.width : 0, y: hidden ? offset.height : 0)
@@ -1020,7 +1030,7 @@ func edgeTabShape(for edge: DockEdge, radius r: CGFloat = 11) -> UnevenRoundedRe
         return UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0,
                                       bottomTrailingRadius: r, topTrailingRadius: r,
                                       style: .continuous)
-    case .bottom:
+    case .bottomLeft, .bottomRight:
         return UnevenRoundedRectangle(topLeadingRadius: r, bottomLeadingRadius: 0,
                                       bottomTrailingRadius: 0, topTrailingRadius: r,
                                       style: .continuous)
@@ -1051,7 +1061,7 @@ private struct Staged: ViewModifier {
         switch edge {
         case .right:  hiddenOffset = CGSize(width: DockGeom.tabWidth + 24, height: 0)
         case .left:   hiddenOffset = CGSize(width: -(DockGeom.tabWidth + 24), height: 0)
-        case .bottom: hiddenOffset = CGSize(width: 0, height: DockGeom.tabWidth + 24)
+        case .bottomLeft, .bottomRight: hiddenOffset = CGSize(width: 0, height: DockGeom.tabWidth + 24)
         }
         return content
             .offset(x: revealed ? 0 : hiddenOffset.width,

@@ -263,8 +263,10 @@ final class EdgeDockController: NSObject {
             frame = verticalFrame(state, full: full, vis: vis, fromRight: true)
         case .left:
             frame = verticalFrame(state, full: full, vis: vis, fromRight: false)
-        case .bottom:
-            frame = bottomFrame(state, full: full, vis: vis)
+        case .bottomRight:
+            frame = bottomFrame(state, full: full, fromRight: true)
+        case .bottomLeft:
+            frame = bottomFrame(state, full: full, fromRight: false)
         }
         panel.setFrame(frame, display: true, animate: false)
     }
@@ -289,22 +291,24 @@ final class EdgeDockController: NSObject {
         }
     }
 
-    /// 下缘:pill/卡片横躺成一排,面板锚在右下角向左、向上生长。
-    /// 贴屏幕真正的底边(而不是 visibleFrame 底边)——用户要的是盖在
-    /// Dock 区域上的屏幕边缘。
-    private func bottomFrame(_ state: EdgeDockState, full: NSRect, vis: NSRect) -> NSRect {
+    /// 下角:pill/卡片横躺成一排,面板锚在对应的下角向对侧、向上生长。
+    /// 贴屏幕真正的底边(而不是 visibleFrame 底边)——盖在 Dock 区域上。
+    private func bottomFrame(_ state: EdgeDockState, full: NSRect, fromRight: Bool) -> NSRect {
         switch state {
         case .rest:
             let size = DockGeom.horizontalPillSize
-            return NSRect(x: full.maxX - size.width - DockGeom.bottomCornerInset,
-                          y: full.minY, width: size.width, height: size.height)
+            let x = fromRight ? full.maxX - size.width - DockGeom.bottomCornerInset
+                              : full.minX + DockGeom.bottomCornerInset
+            return NSRect(x: x, y: full.minY, width: size.width, height: size.height)
         case .fan:
             let side = DockGeom.expandedWidth
-            return NSRect(x: full.maxX - side, y: full.minY, width: side, height: side)
+            let x = fromRight ? full.maxX - side : full.minX
+            return NSRect(x: x, y: full.minY, width: side, height: side)
         case .expanded(let kind):
             let w = DockGeom.panelWidth(kind) + DockGeom.tabWidth
             let h = DockGeom.tabWidth + DockGeom.panelHeight(kind)
-            return NSRect(x: full.maxX - w, y: full.minY, width: w, height: h)
+            let x = fromRight ? full.maxX - w : full.minX
+            return NSRect(x: x, y: full.minY, width: w, height: h)
         }
     }
 
@@ -389,7 +393,7 @@ final class EdgeDockController: NSObject {
             return NSRect(x: f.maxX - depth, y: f.minY, width: depth, height: f.height)
         case .left:
             return NSRect(x: f.minX, y: f.minY, width: depth, height: f.height)
-        case .bottom:
+        case .bottomLeft, .bottomRight:
             return NSRect(x: f.minX, y: f.minY, width: f.width, height: depth)
         }
     }

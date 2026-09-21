@@ -3,17 +3,20 @@ import SwiftUI
 
 // MARK: - 停靠边缘
 
-/// 贴边 dock 停靠的屏幕边缘(顶缘让给菜单栏,不提供)。
+/// 贴边 dock 停靠的位置(顶缘让给菜单栏):左右两缘或两个下角。
 enum DockEdge: String, CaseIterable, Identifiable {
-    case left, right, bottom
+    case left, right, bottomLeft, bottomRight
     var id: String { rawValue }
     var label: String {
         switch self {
         case .left: return "左缘"
         case .right: return "右缘"
-        case .bottom: return "下缘"
+        case .bottomLeft: return "左下角"
+        case .bottomRight: return "右下角"
         }
     }
+    /// 是否为下角停靠(卡片横排站在屏幕底边)。
+    var isBottom: Bool { self == .bottomLeft || self == .bottomRight }
 }
 
 // MARK: - 卡片可见性设置
@@ -63,7 +66,11 @@ final class CardSettings: ObservableObject {
         }
         alwaysShown = UserDefaults.standard.bool(forKey: "deckAlwaysShown")
         hoverRevealsValue = UserDefaults.standard.object(forKey: "cardValuesOnHover") as? Bool ?? true
-        dockEdge = UserDefaults.standard.string(forKey: "dockEdge").flatMap(DockEdge.init(rawValue:)) ?? .right
+        // 旧版"下缘"(bottom)即右下角。
+        let storedEdge = UserDefaults.standard.string(forKey: "dockEdge")
+        dockEdge = storedEdge == "bottom"
+            ? .bottomRight
+            : (storedEdge.flatMap(DockEdge.init(rawValue:)) ?? .right)
     }
 
     /// 按固定顺序返回启用的卡片;没有电池硬件时电池卡永远不出现。
