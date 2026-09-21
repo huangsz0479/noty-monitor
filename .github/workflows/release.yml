@@ -1,40 +1,19 @@
 name: Release
 
+# 手动发版:输入版本号,构建 universal 包并挂到 GitHub Release。
+# 不再继承 noty 的 push-to-main 自动发版——没有 Sparkle/appcast,
+# 也没有按架构拆 DMG,一个 universal zip 覆盖两种架构。
 on:
-  # Merging dev into main is the release button. Documentation, the site and the
-  # appcast the job writes back never cut a release on their own.
-  #
-  # One `push` block cannot filter paths for branches without filtering them for
-  # tags too, and the path filter is the whole point — a README push to main must
-  # not cut a release. So the tag trigger is gone; workflow_dispatch with a
-  # version is the manual path, and it does not need a tag pushed first.
-  push:
-    branches: [main]
-    paths-ignore:
-      # Workflow and CI edits are release *plumbing*, not releasable change —
-      # the 1.5.1 accident was a workflow tweak patch-bumping itself out the
-      # door. The changed release.yml still takes effect on the next real
-      # release, since a push-triggered run uses the file from the pushed merge.
-      - '.github/**'
-      - 'appcast.xml'
-      - 'appcast-intel.xml'
-      - 'site/**'
-      - 'media/**'
-      - 'screenshots/**'
-      - '**/*.md'
-      - 'LICENSE'
-      - 'licenses/**'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release, e.g. 1.0.1'
+        description: 'Version to release, e.g. 1.0.0'
         required: true
 
 permissions:
   contents: write
 
-# Two merges landing close together would otherwise compute the same version and
-# race each other to the same tag.
+# 两次发版撞车时排队,不互相取消。
 concurrency:
   group: release
   cancel-in-progress: false
@@ -48,40 +27,21 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - name: Select the newest installed Xcode
+        run: |
+          LATEST="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "Using $LATEST"
+          sudo xcode-select -s "$LATEST"
+          xcodebuild -version
+
       - name: Work out the version
         id: v
         # Nothing from the event reaches the shell as ${{ }}: a dispatch input is
         # attacker-controlled text, and interpolating it here would run it.
         env:
-          EVENT_NAME: ${{ github.event_name }}
           INPUT_VERSION: ${{ inputs.version }}
-          REF_NAME: ${{ github.ref_name }}
-          REF_TYPE: ${{ github.ref_type }}
         run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            VERSION="$INPUT_VERSION"
-          elif [ "$REF_TYPE" = "tag" ]; then
-            VERSION="${REF_NAME#v}"
-          else
-            # A merge into main. The commit message decides the version when it
-            # says so — "release: 1.2.0" — and otherwise the patch is bumped,
-            # because most merges are fixes and a release should never need a
-            # second step to happen.
-            SUBJECT="$(git log -1 --pretty=%B)"
-            ASKED="$(printf '%s' "$SUBJECT" \
-                     | sed -nE 's/.*[Rr]elease:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' \
-                     | head -1)"
-            if [ -n "$ASKED" ]; then
-              VERSION="$ASKED"
-            else
-              LAST="$(git tag --list 'v*' --sort=-v:refname | head -1)"
-              LAST="${LAST#v}"
-              LAST="${LAST:-0.0.0}"
-              MAJOR="${LAST%%.*}"; REST="${LAST#*.}"
-              MINOR="${REST%%.*}"; PATCH="${REST#*.}"
-              VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
-            fi
-          fi
+          VERSION="$INPUT_VERSION"
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::version must be numeric SemVer (X.Y.Z)"
             exit 1
@@ -93,76 +53,28 @@ jobs:
           {
             echo "version=$VERSION"
             echo "tag=v$VERSION"
-            # a monotonic build number Sparkle can compare
             echo "build=$(git rev-list --count HEAD)"
           } >> "$GITHUB_OUTPUT"
           echo "releasing ${VERSION}"
 
-      - name: Write the release notes
-        if: steps.v.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.v.outputs.version }}
-        run: ./scripts/make-release-notes.sh
-
-      - name: Fetch Sparkle
-        if: steps.v.outputs.skip != 'true'
-        run: ./scripts/fetch-sparkle.sh
-
-      # One DMG per architecture: a universal binary cost a third of the
-      # download for a slice each Mac ignores. Apple Silicon keeps the original
-      # names and feed; Intel gets -intel and its own appcast, which the
-      # x86_64-only build points its SUFeedURL at.
-      - name: Build and package both architectures
+      - name: Build
         if: steps.v.outputs.skip != 'true'
         env:
           MARKETING_VERSION: ${{ steps.v.outputs.version }}
           BUILD_NUMBER: ${{ steps.v.outputs.build }}
-          VERSION: ${{ steps.v.outputs.version }}
         run: |
-          BUILD_ARCHS=arm64 ./build.sh release
-          lipo -info build/Noty.app/Contents/MacOS/Noty | grep -q arm64
-          codesign --verify --deep --strict build/Noty.app
-          ./scripts/make-dmg.sh "$VERSION"
-          mv build/Noty.app build/Noty-arm64.app
+          ./build.sh release
+          lipo -info build/SysMon.app/Contents/MacOS/SysMon | grep -Eq 'arm64.*x86_64|x86_64.*arm64'
+          codesign --verify --deep --strict build/SysMon.app
 
-          BUILD_ARCHS=x86_64 ./build.sh release
-          lipo -info build/Noty.app/Contents/MacOS/Noty | grep -q x86_64
-          /usr/libexec/PlistBuddy -c "Print :SUFeedURL" build/Noty.app/Contents/Info.plist | grep -q appcast-intel
-          codesign --verify --deep --strict build/Noty.app
-          DMG_SUFFIX=-intel ./scripts/make-dmg.sh "$VERSION"
-
-          hdiutil imageinfo "build/Noty-${VERSION}.dmg" >/dev/null
-          hdiutil imageinfo "build/Noty-${VERSION}-intel.dmg" >/dev/null
-
-      - name: Sign the update and write the appcast
+      - name: Package
         if: steps.v.outputs.skip != 'true'
         env:
-          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           VERSION: ${{ steps.v.outputs.version }}
-          BUILD: ${{ steps.v.outputs.build }}
-          TAG: ${{ steps.v.outputs.tag }}
         run: |
-          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
-            echo "::error::SPARKLE_PRIVATE_KEY secret is not set — updates cannot be signed."
-            exit 1
-          fi
-          KEYFILE="$(mktemp)"
-          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEYFILE"
-          echo "key bytes: $(wc -c < "$KEYFILE")"
-          test -x ./Sparkle/bin/sign_update
-          NOTES="$(cat build/release-notes.html)" \
-          ./scripts/make-appcast.sh \
-            "build/Noty-${VERSION}.dmg" \
-            "$KEYFILE" \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Noty.dmg"
-          NOTES="$(cat build/release-notes.html)" \
-          OUT=appcast-intel.xml \
-          ./scripts/make-appcast.sh \
-            "build/Noty-${VERSION}-intel.dmg" \
-            "$KEYFILE" \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Noty-intel.dmg"
-          rm -f "$KEYFILE"
+          # ditto 保留元数据与签名,是分发 .app 的正确打包方式。
+          ditto -c -k --keepParent build/SysMon.app "build/SysMon-${VERSION}.zip"
+          shasum -a 256 "build/SysMon-${VERSION}.zip" > build/SHA256SUMS.txt
 
       - name: Publish the release
         if: steps.v.outputs.skip != 'true'
@@ -171,47 +83,9 @@ jobs:
           VERSION: ${{ steps.v.outputs.version }}
           TAG: ${{ steps.v.outputs.tag }}
         run: |
-          V="$VERSION"
-          # One asset per architecture. The stable names serve both needs at
-          # once: the website's /latest/ link never changes, and the appcast's
-          # URL is already versioned by the tag in its path — shipping a
-          # versioned filename as well just doubled every release page.
-          mv "build/Noty-${V}.dmg" build/Noty.dmg
-          mv "build/Noty-${V}-intel.dmg" build/Noty-intel.dmg
-          # --target pins the tag to the commit this job built, not to whatever
-          # main has drifted to while it ran.
           gh release create "$TAG" \
-            build/Noty.dmg build/Noty-intel.dmg \
-            --title "Noty ${V}" \
+            "build/SysMon-${VERSION}.zip" build/SHA256SUMS.txt \
+            --title "SysMon ${VERSION}" \
             --target "$GITHUB_SHA" \
-            --notes-file build/release-notes.md \
-            --latest || \
-          gh release upload "$TAG" \
-            build/Noty.dmg build/Noty-intel.dmg --clobber
-
-      - name: Commit the appcast so Sparkle can see the update
-        if: steps.v.outputs.skip != 'true'
-        env:
-          VERSION: ${{ steps.v.outputs.version }}
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add appcast.xml appcast-intel.xml
-          if git diff --cached --quiet; then
-            echo "appcast unchanged"
-            exit 0
-          fi
-          git commit -m "Release ${VERSION}: update appcast"
-          # main can move between this job's checkout and its push — a docs commit
-          # is enough to lose the race, and the release then ships without a feed.
-          for attempt in 1 2 3 4 5; do
-            if git push origin HEAD:main; then
-              echo "appcast published on attempt $attempt"
-              exit 0
-            fi
-            echo "push rejected, rebasing and retrying"
-            git pull --rebase origin main
-            sleep 3
-          done
-          echo "::error::could not publish the appcast after 5 attempts"
-          exit 1
+            --notes "Universal binary(Apple Silicon 与 Intel)。下载解压后把 SysMon.app 拖入「应用程序」即可。" \
+            --latest

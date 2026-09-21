@@ -45,13 +45,16 @@ hover 展开 6 张指标卡，点击弹出详情面板；另有右键菜单打�
     `LocalIPReader`（getifaddrs）、`BatteryReader`（IOPowerSources）。
 - **状态层** `MonitorStore.swift` — 单例 ObservableObject。DispatchSourceTimer
   在串行后台队列采样，回主队列写 `@Published`；历史曲线各存 150 点
-  （`historyLimit`）。刷新间隔 1/2/5s，`sampleNow()` 给 ⌘R。
+  （`historyLimit`）。刷新间隔 1/2/5s（持久化到 UserDefaults key
+  `refreshInterval`），`sampleNow()` 给 ⌘R；电池约 10s、卷/IP 约 30s
+  降频重读，且低频数据不变时不重写 `@Published`（避免无谓重绘）。
 - **贴边 dock**：`EdgeDock.swift`（每屏一个 manager + rest/fan/panel 状态机）、
   `EdgeDockViews.swift`（SwiftUI 指标卡，沿用 noty 纸色调色板，每卡专属色）。
 - **完整窗口** `MonitorView.swift` — SwiftUI Charts 曲线 + 六个标签页 +
   进程表（排序/搜索/SIGKILL 强杀）。
-- `Settings.swift` — `CardSettings`（卡片可见性、常驻展开、刷新间隔，
-  UserDefaults 持久化，key：`enabledCards` / `deckAlwaysShown` 等）。
+- `Settings.swift` — `CardSettings`（卡片可见性、常驻展开，UserDefaults
+  持久化，key：`enabledCards` / `deckAlwaysShown`；电池有无以静态
+  `hasBattery` 只探测一次，`cards` 会被 SwiftUI 每次渲染调用）。
 
 ## 关键约定
 
@@ -67,7 +70,15 @@ hover 展开 6 张指标卡，点击弹出详情面板；另有右键菜单打�
 
 ## 当前状态（2026-09）
 
-noty → SysMon 的大改造**尚未提交**：HEAD 还停在 noty 1.9.0
-（"Release 1.9.0: update appcast"），工作区删除了全部便签代码、站点、
-媒体与脚本，新增了上述 SysMon 源码。`.github/workflows/` 里的
-build.yml / release.yml / pages.yml 继承自 noty，尚未核对是否适配。
+noty → SysMon 的大改造已提交：先一笔删除全部便签代码、站点、媒体与
+脚本，再一笔进入 SysMon 源码，其后的提交是评审优化（性能修复、图标、CI）。
+
+CI 已适配 SysMon：`build.yml` 在 push/PR 时构建并校验 universal
+SysMon.app；`release.yml` 改为 workflow_dispatch 手动发版（输入版本号，
+打 universal zip 挂 GitHub Release，无 Sparkle/appcast）；`pages.yml`
+已随站点删除。两个 workflow 都显式选择 runner 上最新的 Xcode
+（部署目标 macosx26.0 需要 macOS 26 SDK）。
+
+App 图标是六色彩条（`Resources/AppIcon.icns` 直接提交，生成脚本未入库）；
+`.github` 之外无遗留 noty 资产。仍无测试套件。`CFBundleIdentifier`
+还是占位的 `local.sysmon.SysMon`，对外分发前建议换成正式 reverse-DNS。

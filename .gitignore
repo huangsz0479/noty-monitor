@@ -2,6 +2,3 @@ build/
 *.dmg
 *.zip
 .DS_Store
-Sparkle/
-sparkle_keys/
-appcast.xml.bak

@@ -119,7 +119,7 @@ final class NetworkSampler {
 
 // MARK: - 电池
 
-struct BatteryInfo {
+struct BatteryInfo: Equatable {
     var percent: Double
     var isCharging: Bool
     var onAC: Bool

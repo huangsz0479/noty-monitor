@@ -219,8 +219,9 @@ enum CardMetrics {
     /// 测量绝不能发生在视图更新过程中(会重入 AttributeGraph 直接 abort),
     /// 所以:未命中时先返回估算值,并在下一拍异步实测,完成后 bump tick 重绘。
     static func measuredHeight(title: String, value: String) -> CGFloat {
-        let key = "\(title)|\(value)"
+        let key = "\(title)|\(Self.quantized(value))"
         if let hit = cache[key] { return hit }
+        if cache.count > 256 { cache.removeAll() }   // 防御:键空间理论有界,仍兜底封顶
         if !pending.contains(key) {
             pending.insert(key)
             DispatchQueue.main.async {
@@ -236,6 +237,12 @@ enum CardMetrics {
             }
         }
         return estimate(title: title)
+    }
+
+    /// 数字折叠成 0 再作缓存键:数值是等宽字体,折叠后宽度与高度都不变,
+    /// 而网速/百分比这类每拍都变的文本不会再产生新键、触发无谓的实测。
+    private static func quantized(_ value: String) -> String {
+        String(value.map { $0.isNumber ? "0" : $0 })
     }
 
     /// 实测未落地时的估算(只需大致正确,一拍后即被实测值替换)。
@@ -348,7 +355,7 @@ struct VerticalMetricLabel: View {
                 }
                 rotated(valueRun, width: Self.measure(value, mono: true))
             } else {
-                rotated(titleRun + Text(" ") + valueRun,
+                rotated(Text("\(titleRun) \(valueRun)"),
                         width: Self.measure(title) + 4 + Self.measure(value, mono: true))
             }
         }
@@ -623,16 +630,7 @@ struct ProcessPanelContent: View {
     @State private var killErrorText: String?
 
     private var filtered: [ProcInfo] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        return store.processes
-            .filter { row in
-                if onlyMine && !row.isCurrentUser { return false }
-                guard !q.isEmpty else { return true }
-                return row.name.lowercased().contains(q)
-                    || row.user.lowercased().contains(q)
-                    || String(row.pid).contains(q)
-            }
-            .sorted(using: sortOrder)
+        ProcFilter.apply(store.processes, query: query, onlyMine: onlyMine, sortOrder: sortOrder)
     }
 
     var body: some View {

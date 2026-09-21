@@ -19,6 +19,23 @@ struct ProcessSample {
     let processes: [ProcInfo]
 }
 
+/// 进程表的共享过滤/排序口径:完整窗口与贴边进程面板保持一致。
+enum ProcFilter {
+    static func apply(_ processes: [ProcInfo], query: String, onlyMine: Bool,
+                      sortOrder: [KeyPathComparator<ProcInfo>]) -> [ProcInfo] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        return processes
+            .filter { row in
+                if onlyMine && !row.isCurrentUser { return false }
+                guard !q.isEmpty else { return true }
+                return row.name.lowercased().contains(q)
+                    || row.user.lowercased().contains(q)
+                    || String(row.pid).contains(q)
+            }
+            .sorted(using: sortOrder)
+    }
+}
+
 /// 每个采样周期枚举全部进程:sysctl 拿列表,libproc 拿每个进程的
 /// 累计 CPU 时间与驻留内存,相邻两次采样求差值得出 CPU%。
 /// 只在采样串行队列上使用,自身无需加锁。

@@ -3,7 +3,7 @@ name: Build
 on:
   push:
     branches: [main, dev]
-    paths-ignore: ['site/**', 'appcast.xml', '**/*.md']
+    paths-ignore: ['**/*.md']
   pull_request:
   workflow_dispatch:
 
@@ -16,23 +16,25 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Fetch Sparkle
-        run: ./scripts/fetch-sparkle.sh
-
-      - name: Regression tests
-        run: ./scripts/test-editor.sh
+      # 部署目标是 macosx26.0,默认工具链的 SDK 可能不够新,选最新的 Xcode。
+      - name: Select the newest installed Xcode
+        run: |
+          LATEST="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "Using $LATEST"
+          sudo xcode-select -s "$LATEST"
+          xcodebuild -version
 
       - name: Build
         run: ./build.sh release
 
       - name: Verify the bundle
         run: |
-          test -x build/Noty.app/Contents/MacOS/Noty
-          codesign --verify --deep --strict build/Noty.app
-          /usr/libexec/PlistBuddy -c "Print :SUFeedURL" build/Noty.app/Contents/Info.plist
-          otool -L build/Noty.app/Contents/MacOS/Noty | grep -q Sparkle
+          test -x build/SysMon.app/Contents/MacOS/SysMon
+          lipo -info build/SysMon.app/Contents/MacOS/SysMon | grep -Eq 'arm64.*x86_64|x86_64.*arm64'
+          codesign --verify --deep --strict build/SysMon.app
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" build/SysMon.app/Contents/Info.plist
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: Noty-app
-          path: build/Noty.app
+          name: SysMon-app
+          path: build/SysMon.app

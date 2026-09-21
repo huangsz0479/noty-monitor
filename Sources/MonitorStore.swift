@@ -25,9 +25,14 @@ final class MonitorStore: ObservableObject {
         localIPs.first { $0.ip.contains(".") }?.ip
     }
 
-    @Published var interval: TimeInterval = 2.0 {
+    @Published var interval: TimeInterval = {
+        let stored = UserDefaults.standard.object(forKey: "refreshInterval") as? TimeInterval
+        return [1.0, 2.0, 5.0].contains(stored) ? stored! : 2.0
+    }() {
         didSet {
-            guard started, oldValue != interval else { return }
+            guard oldValue != interval else { return }
+            UserDefaults.standard.set(interval, forKey: "refreshInterval")
+            guard started else { return }
             startTimer()
         }
     }
@@ -39,6 +44,13 @@ final class MonitorStore: ObservableObject {
     private let systemSampler = SystemSampler()
     private let networkSampler = NetworkSampler()
     private let historyLimit = 150
+    /// 采样周期计数,只在采样队列上访问。
+    private var tick = 0
+    /// 低频数据的最近一次读数(电池/卷/IP 变化很慢,不必每个周期都读),
+    /// 同样只在采样队列上访问。
+    private var cachedBattery: BatteryInfo?
+    private var cachedVolumes: [VolumeInfo] = []
+    private var cachedIPs: [LocalIPReader.Address] = []
 
     func start() {
         guard !started else { return }
@@ -64,9 +76,16 @@ final class MonitorStore: ObservableObject {
         let processSample = processSampler.sample()
         let systemSnapshot = systemSampler.sample(now: processSample.date)
         let netSnapshot = networkSampler.sample(now: processSample.date)
-        let batteryInfo = BatteryReader.read()
-        let volumeList = DiskReader.volumes()
-        let ipList = LocalIPReader.addresses()
+        // 首个周期全量读;之后电池约 10s、卷与 IP 约 30s 才重读一次(按 2s 间隔计)。
+        if tick % 5 == 0 { cachedBattery = BatteryReader.read() }
+        if tick % 15 == 0 {
+            cachedVolumes = DiskReader.volumes()
+            cachedIPs = LocalIPReader.addresses()
+        }
+        tick &+= 1
+        let batteryInfo = cachedBattery
+        let volumeList = cachedVolumes
+        let ipList = cachedIPs
         DispatchQueue.main.async { [weak self] in
             self?.apply(processSample: processSample, system: systemSnapshot,
                         net: netSnapshot, battery: batteryInfo,
@@ -80,9 +99,10 @@ final class MonitorStore: ObservableObject {
         processes = ps.processes
         system = snapshot
         net = netSnapshot
-        battery = batteryInfo
-        volumes = volumeList
-        localIPs = ipList
+        // 低频数据不变时不重写 @Published,避免无意义的界面重绘。
+        if battery != batteryInfo { battery = batteryInfo }
+        if volumes != volumeList { volumes = volumeList }
+        if localIPs != ipList { localIPs = ipList }
 
         cpuHistory.append(snapshot.cpuPercent)
         if cpuHistory.count > historyLimit { cpuHistory.removeFirst(cpuHistory.count - historyLimit) }

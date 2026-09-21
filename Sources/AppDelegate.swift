@@ -49,6 +49,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func openSettings() { SettingsWindow.shared.show() }
 
+    /// 菜单每次打开都会重新校验:开机自启的勾选态跟随当前真实状态,
+    /// 不再停留在启动时定格的值(右键菜单切换后主菜单也能跟上)。
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleLaunchAtLogin) {
+            item.state = launchAtLoginEnabled ? .on : .off
+        }
+        return true
+    }
+
     // MARK: 开机自启
 
     var launchAtLoginEnabled: Bool { SMAppService.mainApp.status == .enabled }

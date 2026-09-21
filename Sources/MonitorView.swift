@@ -34,16 +34,7 @@ struct MonitorView: View {
     @State private var killErrorText: String?
 
     private var filtered: [ProcInfo] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        return store.processes
-            .filter { row in
-                if onlyMine && !row.isCurrentUser { return false }
-                guard !q.isEmpty else { return true }
-                return row.name.lowercased().contains(q)
-                    || row.user.lowercased().contains(q)
-                    || String(row.pid).contains(q)
-            }
-            .sorted(using: sortOrder)
+        ProcFilter.apply(store.processes, query: query, onlyMine: onlyMine, sortOrder: sortOrder)
     }
 
     private var selected: ProcInfo? {

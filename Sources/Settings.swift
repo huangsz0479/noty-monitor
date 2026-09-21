@@ -7,6 +7,10 @@ import SwiftUI
 final class CardSettings: ObservableObject {
     static let shared = CardSettings()
 
+    /// 电池有无在进程生命周期内基本不变,只探测一次——cards 会被 SwiftUI
+    /// 每次渲染调用,不能每次都走 IOKit。
+    static let hasBattery = BatteryReader.read() != nil
+
     @Published var enabled: Set<DockPanelKind> {
         didSet {
             UserDefaults.standard.set(enabled.map(\.rawValue), forKey: "enabledCards")
@@ -34,7 +38,7 @@ final class CardSettings: ObservableObject {
     var cards: [DockPanelKind] {
         DockPanelKind.allCases
             .filter { enabled.contains($0) }
-            .filter { $0 != .battery || BatteryReader.read() != nil }
+            .filter { $0 != .battery || Self.hasBattery }
     }
 }
 
@@ -46,7 +50,7 @@ enum EdgeDockCards {
 
 struct SettingsView: View {
     @ObservedObject var settings = CardSettings.shared
-    private let hasBattery = BatteryReader.read() != nil
+    private let hasBattery = CardSettings.hasBattery
 
     private func binding(_ kind: DockPanelKind) -> Binding<Bool> {
         Binding(
