@@ -1,385 +1,129 @@
-import Foundation
-import ServiceManagement
+import AppKit
+import SwiftUI
 
-/// The language macOS should use for Noty. `system` means there is no
-/// application-specific override, so the normal language preference chain wins.
-enum AppLanguage: String, CaseIterable, Identifiable {
-    case system
-    case english = "en"
-    case simplifiedChinese = "zh-Hans"
+// MARK: - 卡片可见性设置
 
-    var id: String { rawValue }
+/// 哪些指标卡显示在贴边 dock 上,持久化到 UserDefaults。
+final class CardSettings: ObservableObject {
+    static let shared = CardSettings()
 
-    var localizedName: String {
-        switch self {
-        case .system:            L10n.text("language.system")
-        case .english:           L10n.text("language.english")
-        case .simplifiedChinese: L10n.text("language.simplified_chinese")
+    @Published var enabled: Set<DockPanelKind> {
+        didSet {
+            UserDefaults.standard.set(enabled.map(\.rawValue), forKey: "enabledCards")
         }
     }
 
-    var appleLanguageIdentifier: String? {
-        self == .system ? nil : rawValue
+    /// 永久展开(noty 的"保持展开"):开启后卡片常驻屏幕边缘,无需 hover。
+    @Published var alwaysShown: Bool {
+        didSet {
+            UserDefaults.standard.set(alwaysShown, forKey: "deckAlwaysShown")
+        }
     }
 
-    static func resolve(_ identifiers: [String]?) -> AppLanguage {
-        guard let identifier = identifiers?.first?.lowercased() else { return .system }
-        if identifier.hasPrefix("en") { return .english }
-        if identifier == "zh" || identifier.hasPrefix("zh-hans")
-            || identifier.hasPrefix("zh-cn") || identifier.hasPrefix("zh-sg") {
-            return .simplifiedChinese
+    private init() {
+        if let raw = UserDefaults.standard.stringArray(forKey: "enabledCards") {
+            let stored = Set(raw.compactMap(DockPanelKind.init(rawValue:)))
+            enabled = stored.isEmpty ? Set(DockPanelKind.allCases) : stored
+        } else {
+            enabled = Set(DockPanelKind.allCases)
         }
-        return .system
+        alwaysShown = UserDefaults.standard.bool(forKey: "deckAlwaysShown")
+    }
+
+    /// 按固定顺序返回启用的卡片;没有电池硬件时电池卡永远不出现。
+    var cards: [DockPanelKind] {
+        DockPanelKind.allCases
+            .filter { enabled.contains($0) }
+            .filter { $0 != .battery || BatteryReader.read() != nil }
     }
 }
 
-/// Thin UserDefaults wrapper for the handful of togglable preferences.
-enum Settings {
-    private static let d = UserDefaults.standard
-    private static let applicationDomain = Bundle.main.bundleIdentifier ?? "app.noty.Noty"
+enum EdgeDockCards {
+    static var cards: [DockPanelKind] { CardSettings.shared.cards }
+}
 
-    /// Uses the same application-domain preference as macOS System Settings,
-    /// rather than maintaining a second Noty-only language setting.
-    static var appLanguage: AppLanguage {
-        get { appLanguage(in: d, applicationDomain: applicationDomain) }
-        set { setAppLanguage(newValue, in: d) }
-    }
+// MARK: - 设置视图
 
-    static func appLanguage(in defaults: UserDefaults,
-                            applicationDomain: String) -> AppLanguage {
-        let identifiers = defaults.persistentDomain(forName: applicationDomain)?["AppleLanguages"]
-            as? [String]
-        return AppLanguage.resolve(identifiers)
-    }
+struct SettingsView: View {
+    @ObservedObject var settings = CardSettings.shared
+    private let hasBattery = BatteryReader.read() != nil
 
-    static func setAppLanguage(_ language: AppLanguage, in defaults: UserDefaults) {
-        if let identifier = language.appleLanguageIdentifier {
-            defaults.set([identifier], forKey: "AppleLanguages")
-        } else {
-            defaults.removeObject(forKey: "AppleLanguages")
-        }
-    }
-
-    static var showOverFullScreen: Bool {
-        get { d.object(forKey: "showOverFullScreen") as? Bool ?? false }
-        set { d.set(newValue, forKey: "showOverFullScreen") }
-    }
-
-    static var deckOnLeftEdge: Bool {
-        get { d.bool(forKey: "deckOnLeftEdge") }
-        set { d.set(newValue, forKey: "deckOnLeftEdge") }
-    }
-
-    /// Vertical position of the pill along the screen edge (0.0 = bottom, 1.0 = top).
-    static var deckYRatio: CGFloat {
-        get {
-            if let hit = cachedYRatio { return hit }
-            let v = (d.object(forKey: "deckYRatio") as? CGFloat).map { min(max($0, 0.0), 1.0) } ?? 0.5
-            cachedYRatio = v
-            return v
-        }
-        set {
-            let v = min(max(newValue, 0.0), 1.0)
-            cachedYRatio = v
-            d.set(v, forKey: "deckYRatio")
-        }
-    }
-    private static var cachedYRatio: CGFloat?
-
-    /// Target display: "all" for all screens, "main" for primary, or "id:<displayID>".
-    static var displayTarget: String {
-        get { d.string(forKey: "displayTarget") ?? "all" }
-        set { d.set(newValue, forKey: "displayTarget") }
-    }
-
-    /// Max tabs the fan shows before collapsing the remainder into "+N".
-    /// Five keeps every tab at full size instead of squeezing the deck.
-    static let fanLimit = 5
-
-    /// Body text size inside a note.
-    static let fontSizes: [(nameKey: String, size: Double)] = [
-        ("size.small", 12), ("size.medium", 13.5), ("size.large", 15.5), ("size.extra_large", 18)
-    ]
-
-    static let fontRange: ClosedRange<Double> = 10...30
-
-    static var noteFontSize: Double {
-        get {
-            let v = d.double(forKey: "noteFontSize")
-            return fontRange.contains(v) ? v : 13.5
-        }
-        set { d.set(min(max(newValue, fontRange.lowerBound), fontRange.upperBound),
-                    forKey: "noteFontSize") }
-    }
-
-    /// PostScript name of the face note bodies are set in; empty means the
-    /// system font. Defaults to a hand, the way a sticky note actually looks.
-    static var noteFontName: String {
-        get {
-            if let v = d.string(forKey: "noteFontName") { return v }
-            // migrate the old boolean
-            let hand = d.object(forKey: "handwrittenBody") as? Bool ?? true
-            return hand ? "Noteworthy-Light" : ""
-        }
-        set { d.set(newValue, forKey: "noteFontName") }
-    }
-
-    // MARK: Shortcuts
-
-    private static func shortcut(_ key: String, default def: Shortcut) -> Shortcut {
-        guard let data = d.data(forKey: key),
-              let s = try? JSONDecoder().decode(Shortcut.self, from: data) else { return def }
-        return s
-    }
-    private static func setShortcut(_ key: String, _ value: Shortcut) {
-        d.set(try? JSONEncoder().encode(value), forKey: key)
-    }
-
-    /// ⌥⌘N, ⌥⌘A, ⌥⌘L out of the box.
-    static var scNewNote: Shortcut {
-        get { shortcut("scNewNote", default: Shortcut(keyCode: 45, modifiers: 2048 | 256)) }
-        set { setShortcut("scNewNote", newValue) }
-    }
-    static var scAllNotes: Shortcut {
-        get { shortcut("scAllNotes", default: Shortcut(keyCode: 0, modifiers: 2048 | 256)) }
-        set { setShortcut("scAllNotes", newValue) }
-    }
-    static var scCapture: Shortcut {
-        get { shortcut("scCapture", default: Shortcut(keyCode: 49, modifiers: 512 | 256)) }  // ⇧⌘Space
-        set { setShortcut("scCapture", newValue) }
-    }
-    static var scArchive: Shortcut {
-        get { shortcut("scArchive", default: Shortcut(keyCode: 37, modifiers: 2048 | 256)) }
-        set { setShortcut("scArchive", newValue) }
-    }
-
-    // In-note shortcuts. These are matched by the open note itself rather than
-    // registered globally, so a bare key like esc is safe here.
-    private static let cmd: UInt32 = 256, shift: UInt32 = 512
-    private static let opt: UInt32 = 2048, ctrl: UInt32 = 4096
-
-    static var scArchiveNote: Shortcut {
-        get { shortcut("scArchiveNote", default: Shortcut(keyCode: 0,  modifiers: shift | cmd)) }
-        set { setShortcut("scArchiveNote", newValue) }
-    }
-    static var scClose: Shortcut {
-        get { shortcut("scClose",       default: Shortcut(keyCode: 53, modifiers: 0)) }
-        set { setShortcut("scClose", newValue) }
-    }
-    static var scFind: Shortcut {
-        get { shortcut("scFind",        default: Shortcut(keyCode: 3,  modifiers: cmd)) }
-        set { setShortcut("scFind", newValue) }
-    }
-    static var scTask: Shortcut {
-        get { shortcut("scTask",        default: Shortcut(keyCode: 17, modifiers: cmd)) }
-        set { setShortcut("scTask", newValue) }
-    }
-    static var scPin: Shortcut {
-        get { shortcut("scPin",         default: Shortcut(keyCode: 35, modifiers: cmd)) }
-        set { setShortcut("scPin", newValue) }
-    }
-    static var scColour: Shortcut {
-        get { shortcut("scColour",      default: Shortcut(keyCode: 47, modifiers: cmd)) }
-        set { setShortcut("scColour", newValue) }
-    }
-    static var scDelete: Shortcut {
-        get { shortcut("scDelete",      default: Shortcut(keyCode: 51, modifiers: cmd)) }
-        set { setShortcut("scDelete", newValue) }
-    }
-    static var scBigger: Shortcut {
-        get { shortcut("scBigger",      default: Shortcut(keyCode: 24, modifiers: ctrl)) }
-        set { setShortcut("scBigger", newValue) }
-    }
-    static var scSmaller: Shortcut {
-        get { shortcut("scSmaller",     default: Shortcut(keyCode: 27, modifiers: ctrl)) }
-        set { setShortcut("scSmaller", newValue) }
-    }
-
-    // MARK: Deck
-
-    /// How far from the screen edge the deck notices the pointer. A wider strip
-    /// is easier to hit; a narrower one stays further out of the way.
-    static let edgeWidths: [(nameKey: String, width: Double)] = [
-        ("width.narrow", 8), ("width.standard", 14), ("width.wide", 28), ("width.very_wide", 44)
-    ]
-
-    static var edgeWidth: Double {
-        get {
-            let v = d.double(forKey: "edgeWidth")
-            return v >= 4 ? v : 14
-        }
-        set { d.set(newValue, forKey: "edgeWidth") }
-    }
-
-    // A short list of note sizes. Dragging a corner meant re-laying out a window
-    // and a text view on every pointer move; picking from four does it once.
-    static let noteSizes: [(nameKey: String, size: CGSize)] = [
-        ("size.small",  CGSize(width: 400, height: 320)),
-        ("size.medium", CGSize(width: 460, height: 380)),
-        ("size.large",  CGSize(width: 560, height: 470)),
-        ("size.huge",   CGSize(width: 680, height: 560)),
-    ]
-
-    static var noteSizeIndex: Int {
-        get {
-            if let hit = cachedNoteSizeIndex { return hit }
-            let v: Int
-            if let stored = d.object(forKey: "noteSizeIndex") as? Int,
-               noteSizes.indices.contains(stored) {
-                v = stored
-            } else if case let w = d.double(forKey: "noteWidth"), w > 0 {
-                // Carry over a size that was previously dragged: pick the nearest.
-                v = noteSizes.enumerated()
-                    .min { abs($0.element.size.width - w) < abs($1.element.size.width - w) }?
-                    .offset ?? 1
-            } else {
-                v = 1
+    private func binding(_ kind: DockPanelKind) -> Binding<Bool> {
+        Binding(
+            get: { settings.enabled.contains(kind) },
+            set: { on in
+                // 至少保留一张卡。
+                if !on && settings.enabled.count <= 1 { return }
+                if on { settings.enabled.insert(kind) } else { settings.enabled.remove(kind) }
             }
-            cachedNoteSizeIndex = v
-            return v
-        }
-        set {
-            let v = min(max(newValue, 0), noteSizes.count - 1)
-            cachedNoteSizeIndex = v
-            d.set(v, forKey: "noteSizeIndex")
-        }
-    }
-    private static var cachedNoteSizeIndex: Int?
-
-    static var noteSize: CGSize { noteSizes[noteSizeIndex].size }
-
-    /// Open a note by hovering its tab instead of clicking it. Off by default:
-    /// the deck is meant to stay quiet until you ask it for something.
-    static var openOnHover: Bool {
-        get { d.object(forKey: "openOnHover") as? Bool ?? false }
-        set { d.set(newValue, forKey: "openOnHover") }
+        )
     }
 
-    /// How long the pointer must rest on a tab before it opens, so sweeping past
-    /// the deck does not open every note in turn.
-    static let openOnHoverDelay: TimeInterval = 0.4
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("贴边卡片")
+                .font(.system(size: 13, weight: .semibold))
 
-    /// Show a lightweight peek / flyout preview card when hovering a tab.
-    static var tabPreview: Bool {
-        get { d.object(forKey: "tabPreview") as? Bool ?? true }
-        set { d.set(newValue, forKey: "tabPreview") }
-    }
-
-    /// How long the pointer must rest on a tab before its preview card appears.
-    static let tabPreviewDelay: TimeInterval = 0.18
-
-    /// Style Markdown inline — headings, emphasis, code, quotes.
-    static var markdownStyling: Bool {
-        get { d.object(forKey: "markdownStyling") as? Bool ?? true }
-        set { d.set(newValue, forKey: "markdownStyling") }
-    }
-
-    /// Mirror notes into iCloud Drive. Off by default and deliberately so: a
-    /// synced note is written out as plain Markdown, which takes it out of the
-    /// AES-GCM database. Nobody gets that by accident.
-    static var cloudSyncEnabled: Bool {
-        get { d.bool(forKey: "cloudSyncEnabled") }
-        set { d.set(newValue, forKey: "cloudSyncEnabled") }
-    }
-
-    /// How often the sync folder is re-listed. A pass only reads files whose
-    /// modification date moved, so this is a directory listing, not a re-read.
-    static let cloudSyncInterval: TimeInterval = 5
-
-    /// How long the deck may sit untouched before it tidies itself away.
-    static let fanIdleTimeout: TimeInterval = 4
-    static let noteIdleTimeout: TimeInterval = 60
-
-    /// Stop Noty's windows from following the user to every Space: the deck
-    /// and any floating notes stay on the Space they are on, like paper
-    /// stickies on one desk. Off by default — the deck follows everywhere.
-    static var confineToSpace: Bool {
-        get { d.bool(forKey: "confineToSpace") }
-        set { d.set(newValue, forKey: "confineToSpace") }
-    }
-
-    /// Keep the deck fanned out instead of letting it fall back to the pill.
-    /// Only the *resting* state changes — notes still open and tidy away as usual.
-    static var deckAlwaysShown: Bool {
-        get { d.bool(forKey: "deckAlwaysShown") }
-        set { d.set(newValue, forKey: "deckAlwaysShown") }
-    }
-
-    /// With the deck kept open its + and cog buttons sit on screen all day;
-    /// this trades them for a quieter edge (issue #36). The menu bar icon and
-    /// hotkeys still create notes and open Settings.
-    static var deckHideActions: Bool {
-        get { d.bool(forKey: "deckHideActions") }
-        set { d.set(newValue, forKey: "deckHideActions") }
-    }
-
-    /// The size the floating note was last resized to. It starts at the deck
-    /// note's size and keeps whatever you stretch it to — a freely placed note
-    /// that snapped back to a preset on every pull would feel broken.
-    static var floatingNoteSize: CGSize {
-        get {
-            let w = d.double(forKey: "floatingNoteW"), h = d.double(forKey: "floatingNoteH")
-            return w >= 280 && h >= 220 ? CGSize(width: w, height: h) : noteSize
-        }
-        set {
-            d.set(newValue.width, forKey: "floatingNoteW")
-            d.set(newValue.height, forKey: "floatingNoteH")
-        }
-    }
-
-    /// Show nothing at all at rest — no pill, no dashes. The invisible edge
-    /// strip still wakes the deck, so the notes are one hover away; they just
-    /// leave the screen entirely alone until asked for.
-    static var deckPillHidden: Bool {
-        get { d.bool(forKey: "deckPillHidden") }
-        set { d.set(newValue, forKey: "deckPillHidden") }
-    }
-
-    /// Multiplier on every deck metric — tab width, label type, the lap between
-    /// tabs, the chips and the pill. One knob so the deck scales as a whole
-    /// instead of drifting out of proportion with itself.
-    static let deckScaleRange: ClosedRange<Double> = 0.7...1.8
-
-    static let deckSizes: [(nameKey: String, scale: Double)] = [
-        ("size.small", 0.85), ("size.default", 1.0), ("size.large", 1.25), ("size.extra_large", 1.5)
-    ]
-
-    /// Memoized: DeckGeom routes every metric through this, and SwiftUI reads
-    /// those metrics dozens of times per body evaluation during the fan and drag
-    /// animations. A UserDefaults read is a lock and a dictionary lookup (~320 ns
-    /// measured); a stored static is free. All writes come through this setter
-    /// and everything runs on the main thread, so the cache cannot go stale.
-    static var deckScale: Double {
-        get {
-            if let hit = cachedDeckScale { return hit }
-            let raw = d.double(forKey: "deckScale")
-            let v = deckScaleRange.contains(raw) ? raw : 1.0
-            cachedDeckScale = v
-            return v
-        }
-        set {
-            let v = min(max(newValue, deckScaleRange.lowerBound), deckScaleRange.upperBound)
-            cachedDeckScale = v
-            d.set(v, forKey: "deckScale")
-        }
-    }
-    private static var cachedDeckScale: Double?
-
-    /// Labelled tabs, or bare colour chips that barely touch the screen.
-    static var deckStyle: DeckStyle {
-        get { DeckStyle(rawValue: d.string(forKey: "deckStyle") ?? "") ?? .tabs }
-        set { d.set(newValue.rawValue, forKey: "deckStyle") }
-    }
-
-    static var launchAtLogin: Bool {
-        get { SMAppService.mainApp.status == .enabled }
-        set {
-            do {
-                if newValue { try SMAppService.mainApp.register() }
-                else { try SMAppService.mainApp.unregister() }
-            } catch {
-                NSLog("Noty: launch-at-login toggle failed — \(error.localizedDescription)")
+            VStack(spacing: 10) {
+                ForEach(DockPanelKind.allCases) { kind in
+                    Toggle(isOn: binding(kind)) {
+                        HStack(spacing: 8) {
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(kind.palette.dash)
+                                .frame(width: 14, height: 14)
+                            Text(kind.rawValue)
+                            if kind == .battery && !hasBattery {
+                                Text("(未检测到电池)")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(kind == .battery && !hasBattery)
+                }
             }
+
+            Divider()
+
+            Toggle(isOn: $settings.alwaysShown) {
+                Text("永久展开卡片")
+            }
+            .toggleStyle(.checkbox)
+
+            Text("开启后卡片常驻屏幕边缘,无需鼠标划过。")
+
+            Divider()
+
+            Text("鼠标划到屏幕右下角展开卡片,点击卡片查看详情。至少保留一张卡片。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .padding(20)
+        .frame(width: 250, alignment: .leading)
+    }
+}
+
+// MARK: - 设置窗口
+
+final class SettingsWindow: NSObject {
+    static let shared = SettingsWindow()
+    private var window: NSWindow?
+
+    var isOpen: Bool { window?.isVisible ?? false }
+
+    func show() {
+        if window == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 250, height: 300),
+                             styleMask: [.titled, .closable],
+                             backing: .buffered, defer: false)
+            w.title = "设置"
+            w.isReleasedWhenClosed = false
+            w.contentView = NSHostingView(rootView: SettingsView())
+            w.center()
+            window = w
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
     }
 }

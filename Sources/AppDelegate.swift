@@ -1,280 +1,108 @@
 import AppKit
 import SwiftUI
+import ServiceManagement
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var deckManager: DeckManager!
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    private var dockManager: EdgeDockManager!
+    private var fullWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         buildMainMenu()
 
-        deckManager = DeckManager()
-        restoreAfterLanguageRelaunch()
-        UndoToast.shared.start()
-
-        HotKeys.shared.register(
-            newNote: { [weak self] in self?.newNote() },
-            allNotes: { [weak self] in self?.openAllNotes() },
-            archive:  { [weak self] in self?.openArchive() },
-            capture:  { QuickCapture.shared.toggle() }
-        )
-
-        // Sparkle only schedules its background checks once the controller
-        // exists. Until now nothing touched it before the pill's context menu
-        // was opened, so a user who never right-clicked was never offered an
-        // update however long the app ran.
-        _ = Updater.shared
-
-        // Off unless the user asked for it; reload() is a no-op when it is off.
-        CloudSync.shared.reload()
+        dockManager = EdgeDockManager()
+        MonitorStore.shared.start()
     }
 
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        NoteStore.shared.flushAll() ? .terminateNow : .terminateCancel
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false    // 贴边 dock 常驻,关掉完整窗口不退出
     }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        HotKeys.shared.unregisterAll()
-    }
-
-    /// Coming back to the Mac is the likeliest moment for the phone's edits to
-    /// be waiting, and the poll may be up to its full interval away.
-    func applicationDidBecomeActive(_ notification: Notification) {
-        CloudSync.shared.syncNow()
-    }
-
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     // MARK: Actions
 
-    @objc func newNote() {
-        let note = NoteStore.shared.create()
-        deckManager.focused?.expand(note.id)
-    }
-
-    @objc func openAllNotes() { LibraryWindow.shared.show(mode: .all) }
-    @objc func quickCapture() { QuickCapture.shared.toggle() }
-
-    /// noty:// — the whole automation surface. The text only ever becomes note
-    /// content, never anything executed, so there is nothing here to harden
-    /// beyond ignoring what we do not recognise.
-    ///   noty://new?text=…   create a note (no text → open quick capture)
-    ///   noty://capture      open the quick capture box
-    ///   noty://all          the All Notes window
-    ///   noty://settings     the Settings window
-    func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls where url.scheme == "noty" {
-            let text = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                .queryItems?.first { $0.name == "text" }?.value ?? ""
-            switch url.host {
-            case "new" where !text.isEmpty:
-                _ = NoteStore.shared.create(body: text)
-            case "new", "capture":
-                QuickCapture.shared.show()
-            case "all":      openAllNotes()
-            case "settings": openSettings()
-            default: break
-            }
+    /// 贴边 dock 的右键菜单 / 菜单栏入口:打开带完整功能的窗口。
+    @objc func openFullWindow() {
+        NSApp.setActivationPolicy(.regular)
+        if fullWindow == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 640),
+                             styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                             backing: .buffered, defer: false)
+            w.title = "系统监视器"
+            w.isReleasedWhenClosed = false
+            w.minSize = NSSize(width: 760, height: 480)
+            w.setFrameAutosaveName("SysMonMainWindow")
+            w.delegate = self
+            w.contentView = NSHostingView(rootView: MonitorView(store: MonitorStore.shared))
+            w.center()
+            fullWindow = w
         }
+        NSApp.activate(ignoringOtherApps: true)
+        fullWindow?.makeKeyAndOrderFront(nil)
     }
+
+    func windowWillClose(_ notification: Notification) {
+        // 完整窗口关掉后回到无 Dock 图标的常驻形态。
+        DispatchQueue.main.async { NSApp.setActivationPolicy(.accessory) }
+    }
+
+    @objc func refreshNowMenu() { MonitorStore.shared.sampleNow() }
+
     @objc func openSettings() { SettingsWindow.shared.show() }
 
-    /// Re-read preferences into every deck. Settings calls this on each change.
-    func refreshDecks() { deckManager.refreshAll() }
-    @objc func openArchive() { LibraryWindow.shared.show(mode: .archive) }
+    // MARK: 开机自启
 
-    @objc func toggleOverFullScreen() {
-        Settings.showOverFullScreen.toggle()
-        deckManager.refreshAll()
-    }
-
-    @objc func setDeckStyle(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let style = DeckStyle(rawValue: raw) else { return }
-        Settings.deckStyle = style
-        deckManager.refreshAll()
-    }
-
-    @objc func setFontSize(_ sender: NSMenuItem) {
-        guard let size = sender.representedObject as? Double else { return }
-        Settings.noteFontSize = size
-        deckManager.refreshAll()
-    }
-
-    /// ⌃+ / ⌃- while a note is open.
-    func stepFontSize(by delta: Double) {
-        Settings.noteFontSize += delta
-        deckManager.refreshAll()
-    }
-
-    @objc func biggerText()  { stepFontSize(by: 1.5) }
-    @objc func smallerText() { stepFontSize(by: -1.5) }
-
-    @objc func setNoteFont(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
-        Settings.noteFontName = name
-        deckManager.refreshAll()
-    }
-
-    @objc func toggleDeckAlwaysShown() {
-        Settings.deckAlwaysShown.toggle()
-        deckManager.refreshAll()
-    }
-
-    @objc func setDeckScale(_ sender: NSMenuItem) {
-        guard let scale = sender.representedObject as? Double else { return }
-        Settings.deckScale = scale
-        deckManager.refreshAll()
-    }
-
-    @objc func toggleDeckEdge() {
-        Settings.deckOnLeftEdge.toggle()
-        deckManager.refreshAll()
-    }
-
-    @objc func setDisplayTarget(_ sender: NSMenuItem) {
-        guard let target = sender.representedObject as? String else { return }
-        Settings.displayTarget = target
-        SettingsWindow.shared.syncPreferences()
-    }
+    var launchAtLoginEnabled: Bool { SMAppService.mainApp.status == .enabled }
 
     @objc func toggleLaunchAtLogin() {
-        Settings.launchAtLogin.toggle()
-    }
-
-    @objc func exportMarkdown()  { Transfer.export(.markdown,  notes: NoteStore.shared.notes) }
-    @objc func exportPlainText() { Transfer.export(.plainText, notes: NoteStore.shared.notes) }
-    @objc func exportSingleFile(){ Transfer.export(.singleFile, notes: NoteStore.shared.notes) }
-    @objc func exportStickies()  { Transfer.export(.stickies,  notes: NoteStore.shared.notes) }
-    @objc func importStickies()  { Transfer.importFiles() }
-
-    @objc func checkForUpdates() { Updater.shared.checkForUpdates() }
-
-    @objc func toggleAutoUpdates() {
-        Updater.shared.automaticallyChecks.toggle()
-    }
-
-    @objc func quit() { NSApp.terminate(nil) }
-
-    /// Bundle localization is fixed for the lifetime of a process. Launch the
-    /// replacement first, then terminate only after Launch Services confirms it.
-    /// On failure the preference is rolled back and the picker re-synced, so the
-    /// window does not sit there claiming a language the running UI never uses.
-    func relaunchForLanguageChange(previous: AppLanguage) {
-        guard !isRelaunching else { return }
-        guard NoteStore.shared.flushAll() else {
-            Settings.appLanguage = previous
-            SettingsWindow.shared.syncPreferences()
-            return
-        }
-        isRelaunching = true
-
-        // Hand the new instance everything worth putting back: the expanded
-        // note (one per screen is impossible, only one deck is ever expanded)
-        // and, most importantly, the settings window the user is standing in.
-        let expanded = deckManager.decks.values.first { $0.model.state.expandedID != nil }
-        let resume = ReloadResume(
-            noteID: expanded?.model.state.expandedID,
-            displayID: expanded?.displayID,
-            settingsOpen: SettingsWindow.shared.isOpen)
-        if resume.open { ReloadResume.save(resume) }
-
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        configuration.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL,
-                                           configuration: configuration) { _, error in
-            DispatchQueue.main.async {
-                if let error {
-                    NSLog("Noty: language-change relaunch failed — \(error.localizedDescription)")
-                    ReloadResume.clear()
-                    Settings.appLanguage = previous
-                    SettingsWindow.shared.syncPreferences()
-                    self.isRelaunching = false
-                } else {
-                    NSApp.terminate(nil)
-                }
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+            } else {
+                try service.register()
             }
+        } catch {
+            NSLog("SysMon: 设置开机自启失败 — \(error.localizedDescription)")
         }
     }
 
-    /// A language-change relaunch through the state the old process handed
-    /// over: reopen the same note on the same display, and the settings window.
-    private func restoreAfterLanguageRelaunch() {
-        guard let resume = ReloadResume.loadAndClear(), resume.open else { return }
-        if let id = resume.noteID, NoteStore.shared.note(id: id) != nil {
-            // Let the freshly launched deck settle into its resting pose before
-            // the note animates in, so it does not fight the restore.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                let deck = self?.deckManager.decks[resume.displayID ?? 0] ?? self?.deckManager.focused
-                deck?.expand(id)
-            }
-        }
-        if resume.settingsOpen { openSettings() }
-    }
-
-    private var isRelaunching = false
-
-    @objc func showAbout() {
+    @objc private func showAbout() {
         NSApp.activate()
-        let a = NSAlert()
-        a.messageText = "Noty"
-        a.informativeText = L10n.text("about.body")
-        a.runModal()
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
+        let alert = NSAlert()
+        alert.messageText = "系统监视器 (SysMon)"
+        alert.informativeText = "版本 \(version)\n基于 noty(MIT 许可)改造的贴边系统监视器。\n鼠标划到屏幕右边缘展开指标卡。"
+        alert.runModal()
     }
 
     // MARK: Main menu
-    //
-    // An accessory app draws no menu bar, but NSApp.mainMenu is still what
-    // dispatches ⌘C/⌘V/⌘Z inside the note editor — without it, text editing
-    // loses every standard shortcut.
 
     private func buildMainMenu() {
         let main = NSMenu()
 
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: L10n.text("menu.about"), action: #selector(showAbout), keyEquivalent: "")
-        appMenu.addItem(withTitle: L10n.text("menu.check_for_updates"), action: #selector(checkForUpdates), keyEquivalent: "")
+        appMenu.addItem(withTitle: "关于系统监视器", action: #selector(showAbout), keyEquivalent: "")
         appMenu.addItem(.separator())
-        let newNoteItem = appMenu.addItem(withTitle: L10n.text("menu.new_note"), action: #selector(newNote), keyEquivalent: "n")
-        let allNotesItem = appMenu.addItem(withTitle: L10n.text("menu.all_notes"), action: #selector(openAllNotes), keyEquivalent: "a")
-        let archiveItem = appMenu.addItem(withTitle: L10n.text("menu.archive"), action: #selector(openArchive), keyEquivalent: "l")
+        appMenu.addItem(withTitle: "打开完整窗口", action: #selector(openFullWindow), keyEquivalent: "n")
+        appMenu.addItem(withTitle: "设置…", action: #selector(openSettings), keyEquivalent: ",")
+        appMenu.addItem(withTitle: "立即刷新", action: #selector(refreshNowMenu), keyEquivalent: "r")
+        let login = appMenu.addItem(withTitle: "开机自启", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        login.state = launchAtLoginEnabled ? .on : .off
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: L10n.text("menu.settings"), action: #selector(openSettings), keyEquivalent: ",")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: L10n.text("menu.import"), action: #selector(importStickies), keyEquivalent: "i")
-        appMenu.addItem(.separator())
-        let bigger = appMenu.addItem(withTitle: L10n.text("menu.bigger_text"), action: #selector(biggerText), keyEquivalent: "+")
-        bigger.keyEquivalentModifierMask = [.control]
-        let smaller = appMenu.addItem(withTitle: L10n.text("menu.smaller_text"), action: #selector(smallerText), keyEquivalent: "-")
-        smaller.keyEquivalentModifierMask = [.control]
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: L10n.text("menu.hide"), action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        appMenu.addItem(withTitle: L10n.text("menu.quit"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        // The three global shortcuts already carry ⌥; mirror that here so the menu
-        // items do not shadow ⌘N / ⌘A / ⌘L inside text fields.
-        for item in [newNoteItem, allNotesItem, archiveItem] {
-            item.keyEquivalentModifierMask = [.command, .option]
-        }
-        for item in appMenu.items where item.action != nil
-            && item.action != #selector(NSApplication.hide(_:))
-            && item.action != #selector(NSApplication.terminate(_:)) {
+        appMenu.addItem(withTitle: "退出系统监视器", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        for item in appMenu.items where item.action != #selector(NSApplication.terminate(_:)) {
             item.target = self
         }
         appItem.submenu = appMenu
         main.addItem(appItem)
 
         let editItem = NSMenuItem()
-        let edit = NSMenu(title: L10n.text("menu.edit"))
-        edit.addItem(withTitle: L10n.text("menu.undo"), action: Selector(("undo:")), keyEquivalent: "z")
-        let redo = edit.addItem(withTitle: L10n.text("menu.redo"), action: Selector(("redo:")), keyEquivalent: "z")
-        redo.keyEquivalentModifierMask = [.command, .shift]
-        edit.addItem(.separator())
-        edit.addItem(withTitle: L10n.text("menu.cut"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: L10n.text("menu.copy"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: L10n.text("menu.paste"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: L10n.text("menu.select_all"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let edit = NSMenu(title: "编辑")
+        edit.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit
         main.addItem(editItem)
 
