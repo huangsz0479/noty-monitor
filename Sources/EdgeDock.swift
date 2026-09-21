@@ -287,19 +287,21 @@ final class EdgeDockController: NSObject {
     }
 
     /// 下缘:pill/卡片横躺成一排,面板锚在右下角向左、向上生长。
+    /// 贴屏幕真正的底边(而不是 visibleFrame 底边)——用户要的是盖在
+    /// Dock 区域上的屏幕边缘。
     private func bottomFrame(_ state: EdgeDockState, full: NSRect, vis: NSRect) -> NSRect {
         switch state {
         case .rest:
             let size = DockGeom.horizontalPillSize
             return NSRect(x: full.maxX - size.width - DockGeom.pillBottomMargin,
-                          y: vis.minY, width: size.width, height: size.height)
+                          y: full.minY, width: size.width, height: size.height)
         case .fan:
             let side = DockGeom.expandedWidth
-            return NSRect(x: full.maxX - side, y: vis.minY, width: side, height: side)
+            return NSRect(x: full.maxX - side, y: full.minY, width: side, height: side)
         case .expanded(let kind):
             let w = DockGeom.panelWidth(kind) + DockGeom.tabWidth
             let h = DockGeom.tabWidth + DockGeom.panelHeight(kind)
-            return NSRect(x: full.maxX - w, y: vis.minY, width: w, height: h)
+            return NSRect(x: full.maxX - w, y: full.minY, width: w, height: h)
         }
     }
 
