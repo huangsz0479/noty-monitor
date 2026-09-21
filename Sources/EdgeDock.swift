@@ -71,6 +71,9 @@ enum DockGeom {
     /// pill 停靠在右下角,避开原版 noty 在右边缘中部的默认位置。
     static let pillBottomMargin: CGFloat = 16
 
+    /// 下缘停靠时与右下角的留白,比左右缘更贴角。
+    static let bottomCornerInset: CGFloat = 4
+
     /// 下缘停靠:pill 横躺,彩条并排成一排。
     static var horizontalPillSize: CGSize {
         let n = CGFloat(EdgeDockCards.cards.count)
@@ -293,7 +296,7 @@ final class EdgeDockController: NSObject {
         switch state {
         case .rest:
             let size = DockGeom.horizontalPillSize
-            return NSRect(x: full.maxX - size.width - DockGeom.pillBottomMargin,
+            return NSRect(x: full.maxX - size.width - DockGeom.bottomCornerInset,
                           y: full.minY, width: size.width, height: size.height)
         case .fan:
             let side = DockGeom.expandedWidth

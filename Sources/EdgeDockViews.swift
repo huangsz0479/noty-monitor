@@ -91,7 +91,7 @@ struct EdgeDockRootView: View {
         case .left:
             return EdgeInsets(top: pillTop(panelHeight: ph), leading: 1, bottom: 0, trailing: 0)
         case .bottom:
-            let trailing = max(1, pw - DockGeom.pillBottomMargin - DockGeom.horizontalPillSize.width)
+            let trailing = max(1, pw - DockGeom.bottomCornerInset - DockGeom.horizontalPillSize.width)
             return EdgeInsets(top: 0, leading: 0, bottom: 1, trailing: trailing)
         }
     }
@@ -101,8 +101,8 @@ struct EdgeDockRootView: View {
         case .right, .left:
             return EdgeInsets(top: fanTop(panelHeight: ph), leading: 0, bottom: 0, trailing: 0)
         case .bottom:
-            // 卡片一排站在右下角的底边上。
-            return EdgeInsets(top: 0, leading: 0, bottom: 2, trailing: 12)
+            // 卡片一排贴着右下角站在底边上。
+            return EdgeInsets(top: 0, leading: 0, bottom: 2, trailing: DockGeom.bottomCornerInset)
         }
     }
 
@@ -304,19 +304,18 @@ struct MetricFanColumn: View {
 
     /// 下缘:卡片横向并排,一起站在底边上。注意必须用 trailing 定位——
     /// bottomTrailing 对齐下 leading padding 会被透明占位吃掉,卡片全叠在一处。
-    /// 顺序与竖排镜像:CPU 在最左,齿轮贴角(进程)之后,与 pill 相邻。
+    /// 进程贴右下角,齿轮按用户习惯放在整排最左端。
     private var bottomColumn: some View {
         ZStack(alignment: .bottomTrailing) {
             ForEach(Array(layouts.enumerated()), id: \.element.kind.id) { idx, item in
                 placedTab(item: item, index: idx)
                     .padding(.trailing,
-                             DockGeom.cogSize + DockGeom.cogGap + 4
-                                 + CGFloat(EdgeDockCards.cards.count - 1 - idx)
-                                     * (DockGeom.tabWidth - DockGeom.tabLap))
+                             CGFloat(EdgeDockCards.cards.count - 1 - idx)
+                                 * (DockGeom.tabWidth - DockGeom.tabLap))
             }
 
             CogButton { SettingsWindow.shared.show() }
-                .padding(.trailing, 4)
+                .padding(.trailing, rowWidth + 4)
                 .staged(index: EdgeDockCards.cards.count,
                         total: EdgeDockCards.cards.count + 1,
                         revealed: isRevealed, edge: dock.edge)
