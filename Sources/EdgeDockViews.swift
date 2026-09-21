@@ -95,9 +95,11 @@ struct EdgeDockRootView: View {
             // 下角:rest/fan 面板共享同一条角落边,pill 恒贴角即可全程不挪位。
             // 不能用随面板宽度变化的公式——收起动画的 0.45s 里面板还是
             // 全宽,会把 pill 算到卡片排那端,弹回角落时肉眼可见地跳一下。
-            return EdgeInsets(top: 0, leading: 0, bottom: 1, trailing: 1)
+            return EdgeInsets(top: 0, leading: 0, bottom: 1,
+                              trailing: DockGeom.bottomCornerInset + 1)
         case .bottomLeft:
-            return EdgeInsets(top: 0, leading: 1, bottom: 1, trailing: 0)
+            return EdgeInsets(top: 0, leading: DockGeom.bottomCornerInset + 1,
+                              bottom: 1, trailing: 0)
         }
     }
 
@@ -168,7 +170,7 @@ struct MonitorPillView: View {
 
     var body: some View {
         pillContent
-            .frame(width: edge.isBottom ? nil : DockGeom.pillWidth,
+            .frame(width: edge.isBottom ? DockGeom.horizontalPillSize.width : DockGeom.pillWidth,
                    height: edge.isBottom ? DockGeom.horizontalPillSize.height : nil)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)

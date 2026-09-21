@@ -297,8 +297,9 @@ final class EdgeDockController: NSObject {
         switch state {
         case .rest:
             let size = DockGeom.horizontalPillSize
-            let x = fromRight ? full.maxX - size.width - DockGeom.bottomCornerInset
-                              : full.minX + DockGeom.bottomCornerInset
+            // rest 与 fan/expanded 面板共用同一条角落边(留白统一由 pill 的
+            // 内边距承担),pill 在整个展开/收起动画里零位移。
+            let x = fromRight ? full.maxX - size.width : full.minX
             return NSRect(x: x, y: full.minY, width: size.width, height: size.height)
         case .fan:
             let side = DockGeom.expandedWidth
