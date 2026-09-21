@@ -182,9 +182,8 @@ struct MetricFanColumn: View {
             // 不用 VStack 负间距:它对带 rotationEffect 的不定高子视图会算错总高。
             ForEach(Array(layouts.enumerated()), id: \.element.kind.id) { idx, item in
                 tab(item: item, index: idx)
-                    .padding(.top, item.y)
-                    .staged(index: idx, total: EdgeDockCards.cards.count + 1,
-                            revealed: isRevealed, onRight: true)
+                    // onHover 必须贴在卡片本体上(padding 之前):padding 的透明区域
+                    // 也是命中区,而最后一张卡的 padding 覆盖整列,挂外面会全部命中它。
                     .onHover { entering in
                         // 只清掉自己的 hover:跨卡移动时 exit 事件可能晚于下一张的 enter。
                         if entering {
@@ -193,6 +192,9 @@ struct MetricFanColumn: View {
                             dock.hoveredCard = nil
                         }
                     }
+                    .padding(.top, item.y)
+                    .staged(index: idx, total: EdgeDockCards.cards.count + 1,
+                            revealed: isRevealed, onRight: true)
             }
 
             CogButton { SettingsWindow.shared.show() }
