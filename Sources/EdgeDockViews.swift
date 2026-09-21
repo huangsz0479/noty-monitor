@@ -70,6 +70,7 @@ struct EdgeDockRootView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }
         .animation(.spring(response: 0.30, dampingFraction: 0.9), value: dock.state != .rest)
+        .animation(.snappy(duration: 0.3), value: dock.hoveredCard)
     }
 
     /// 面板全高时 pill 仍落在右下角的屏幕位置上:面板在它周围长大、
@@ -87,7 +88,8 @@ struct EdgeDockRootView: View {
     /// 扇形以 pill 中心为轴向上展开,但不跑出屏幕。
     private func fanTop(panelHeight h: CGFloat) -> CGFloat {
         let pillCenter = h - DockGeom.pillBottomMargin - DockGeom.pillHeight / 2
-        let stack = CardMetrics.totalHeight(values: cardValues) + DockGeom.cogGap + DockGeom.cogSize
+        let stack = CardMetrics.totalHeight(values: cardValues, revealed: dock.hoveredCard)
+            + DockGeom.cogGap + DockGeom.cogSize
         return min(max(12, pillCenter - stack / 2), max(12, h - stack - 12))
     }
 
@@ -95,7 +97,8 @@ struct EdgeDockRootView: View {
     /// 稳定可预期,不再跟着被点的卡片上下飞。
     private func panelTop(kind: DockPanelKind, panelHeight h: CGFloat) -> CGFloat {
         let panelH = DockGeom.panelHeight(kind)
-        let stack = CardMetrics.totalHeight(values: cardValues) + DockGeom.cogGap + DockGeom.cogSize
+        let stack = CardMetrics.totalHeight(values: cardValues, revealed: dock.hoveredCard)
+            + DockGeom.cogGap + DockGeom.cogSize
         let ideal = fanTop(panelHeight: h) + (stack - panelH) / 2
         return min(max(10, ideal), max(10, h - panelH - 10))
     }
@@ -155,14 +158,17 @@ struct MetricFanColumn: View {
     }
 
     private var layouts: [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] {
-        CardMetrics.layouts(values: valuesById)
+        CardMetrics.layouts(values: valuesById, revealed: dock.hoveredCard)
     }
 
-    private var totalHeight: CGFloat { CardMetrics.totalHeight(values: valuesById) }
+    private var totalHeight: CGFloat {
+        CardMetrics.totalHeight(values: valuesById, revealed: dock.hoveredCard)
+    }
 
+    /// 默认只显示标题;数值仅在被 hover 的卡上亮出(hover,不是 click)。
     private func tab(item: (kind: DockPanelKind, y: CGFloat, height: CGFloat), index: Int) -> some View {
         MetricTab(title: item.kind.rawValue,
-                  value: valuesById[item.kind] ?? "",
+                  value: dock.hoveredCard == item.kind ? (valuesById[item.kind] ?? "") : "",
                   palette: item.kind.palette,
                   isOpen: dock.state.expandedKind == item.kind,
                   height: item.height,
@@ -179,6 +185,14 @@ struct MetricFanColumn: View {
                     .padding(.top, item.y)
                     .staged(index: idx, total: EdgeDockCards.cards.count + 1,
                             revealed: isRevealed, onRight: true)
+                    .onHover { entering in
+                        // 只清掉自己的 hover:跨卡移动时 exit 事件可能晚于下一张的 enter。
+                        if entering {
+                            dock.hoveredCard = item.kind
+                        } else if dock.hoveredCard == item.kind {
+                            dock.hoveredCard = nil
+                        }
+                    }
             }
 
             CogButton { SettingsWindow.shared.show() }
@@ -195,6 +209,7 @@ struct MetricFanColumn: View {
                 .padding(.trailing, 3)
                 .allowsHitTesting(false)
         }
+        .animation(.snappy(duration: 0.3), value: dock.hoveredCard)
         .animation(.snappy(duration: 0.3), value: layouts.map { $0.height })
         .onAppear {
             DispatchQueue.main.async { appeared = true }
@@ -204,7 +219,10 @@ struct MetricFanColumn: View {
             DispatchQueue.main.async { appeared = true }
         }
         .onChange(of: dock.state) { _, newState in
-            if newState == .rest { appeared = false }
+            if newState == .rest {
+                appeared = false
+                dock.hoveredCard = nil   // 收起后下次展开不带旧的 hover 态
+            }
         }
     }
 }
@@ -236,7 +254,7 @@ enum CardMetrics {
                 MonitorStore.shared.layoutTick &+= 1
             }
         }
-        return estimate(title: title)
+        return estimate(title: title, value: value)
     }
 
     /// 数字折叠成 0 再作缓存键:数值是等宽字体,折叠后宽度与高度都不变,
@@ -246,25 +264,35 @@ enum CardMetrics {
     }
 
     /// 实测未落地时的估算(只需大致正确,一拍后即被实测值替换)。
-    private static func estimate(title: String) -> CGFloat {
+    private static func estimate(title: String, value: String) -> CGFloat {
         let upright = !title.isEmpty && title.allSatisfy(UpRight.isUpright)
-        let content: CGFloat = upright ? CGFloat(title.count) * 17 + 23 : 58
-        return 5 + content + 12
+        if upright {
+            let titleStack = 5 + CGFloat(title.count) * 17 + 12
+            return value.isEmpty ? titleStack : titleStack + 23
+        }
+        // 非直立时卡片高 ≈ 横排文本实测宽。
+        let width = VerticalMetricLabel.measure(title)
+            + (value.isEmpty ? 0 : 4 + VerticalMetricLabel.measure(value, mono: true))
+        return 5 + width + 12
     }
 
-    static func layouts(values: [DockPanelKind: String]) -> [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] {
+    /// revealed = 正被 hover 的卡:只有它按"标题 + 数值"实测,其余只算标题高度。
+    static func layouts(values: [DockPanelKind: String],
+                        revealed: DockPanelKind? = nil) -> [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] {
         var result: [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] = []
         var y: CGFloat = 0
         for kind in EdgeDockCards.cards {
-            let h = measuredHeight(title: kind.rawValue, value: values[kind] ?? "")
+            let shown = revealed == kind ? (values[kind] ?? "") : ""
+            let h = measuredHeight(title: kind.rawValue, value: shown)
             result.append((kind, y, h))
             y += h - DockGeom.tabLap
         }
         return result
     }
 
-    static func totalHeight(values: [DockPanelKind: String]) -> CGFloat {
-        guard let last = layouts(values: values).last else { return 0 }
+    static func totalHeight(values: [DockPanelKind: String],
+                            revealed: DockPanelKind? = nil) -> CGFloat {
+        guard let last = layouts(values: values, revealed: revealed).last else { return 0 }
         return last.y + last.height
     }
 
@@ -353,7 +381,11 @@ struct VerticalMetricLabel: View {
                             .foregroundStyle(palette.ink.opacity(0.85))
                     }
                 }
-                rotated(valueRun, width: Self.measure(value, mono: true))
+                if !value.isEmpty {
+                    rotated(valueRun, width: Self.measure(value, mono: true))
+                }
+            } else if value.isEmpty {
+                rotated(titleRun, width: Self.measure(title))
             } else {
                 rotated(Text("\(titleRun) \(valueRun)"),
                         width: Self.measure(title) + 4 + Self.measure(value, mono: true))

@@ -35,6 +35,8 @@ enum EdgeDockState: Equatable {
 
 final class EdgeDockModel: ObservableObject {
     @Published var state: EdgeDockState = .rest
+    /// hover 的那张卡:拉高并把具体数值亮出来(hover,不是 click;click 仍开详情面板)。
+    @Published var hoveredCard: DockPanelKind?
     @Published var revealTick = 0       // bumped to restage the fan animation
     @Published var fanHeight: CGFloat = 0   // 卡片列实测自然高度
 }
@@ -309,7 +311,8 @@ final class EdgeDockController: NSObject {
                 self.lastPointer = now
                 self.lastActivity = Date()
             }
-            if self.model.state == .fan,
+            // 正悬停在某张卡上看数值时不算"无人看管",不自动收起。
+            if self.model.state == .fan, self.model.hoveredCard == nil,
                Date().timeIntervalSince(self.lastActivity) > 3.0 {
                 self.collapse()
             }
