@@ -15,5 +15,7 @@
 	<key>LSUIElement</key>             <true/>
 	<key>NSHighResolutionCapable</key> <true/>
 	<key>NSHumanReadableCopyright</key><string>Derived from Noty (MIT).</string>
+	<key>NSMicrophoneUsageDescription</key><string>开启「声音律动」后,SysMon 会截取系统正在播放的声音用于频谱动画。不使用麦克风,不录音,不存储。</string>
+	<key>NSAudioCaptureUsageDescription</key><string>开启「声音律动」后,SysMon 会截取系统正在播放的声音,画成频谱。不录音,不存储。</string>
 </dict>
 </plist>

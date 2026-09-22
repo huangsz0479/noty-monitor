@@ -7,7 +7,16 @@ import Darwin
 final class MonitorStore: ObservableObject {
     static let shared = MonitorStore()
 
+    /// 完整进程表。只有进程面板、Java 面板或完整窗口开着时才更新。
     @Published private(set) var processes: [ProcInfo] = []
+    /// 卡片用的进程摘要,每个采样周期都更新(没变则不写)。
+    @Published private(set) var digest = ProcessDigest()
+    /// 今天的 CPU 峰值,一句话。
+    @Published private(set) var dailyPeak: DailyPeak?
+    /// 静止时该自己探出来的那张卡。
+    @Published private(set) var attention: DockPanelKind?
+    /// 小圆点彩条的强度,跨档才变。
+    @Published private(set) var dashLevels = DashLevels()
     @Published private(set) var system = SystemSnapshot()
     @Published private(set) var cpuHistory: [Double] = []   // 全核聚合 %
     @Published private(set) var memHistory: [Double] = []   // 已用 GiB
@@ -49,31 +58,71 @@ final class MonitorStore: ObservableObject {
     private let systemSampler = SystemSampler()
     private let networkSampler = NetworkSampler()
     private let diskIOSampler = DiskIOSampler()
+    private let pulseSampler = AudioSpectrumSampler()
     private let historyLimit = 150
     /// 套餐余量变化很慢,独立 60s 轮询,不走主采样循环(网络请求不能阻塞
     /// 串行采样队列)。
     private let glmQueue = DispatchQueue(label: "sysmon.glm", qos: .utility)
     private var glmTimer: DispatchSourceTimer?
     private var glmBag = Set<AnyCancellable>()
-    /// 采样周期计数,只在采样队列上访问。
-    private var tick = 0
-    /// 低频数据的最近一次读数(电池/卷/IP 变化很慢,不必每个周期都读),
-    /// 同样只在采样队列上访问。
+    /// 低频数据的最近一次读数(电池约 10s、卷与 IP 约 30s,按时间而不是拍数),
+    /// 只在采样队列上访问。
+    private var lastBatteryAt: Date?
+    private var lastVolumeAt: Date?
     private var cachedBattery: BatteryInfo?
     private var cachedVolumes: [VolumeInfo] = []
     private var cachedIPs: [LocalIPReader.Address] = []
+    /// 进程全表的订阅数。贴边进程/Java 面板与完整窗口各算一份。
+    /// 主线程增减,采样队列读取,用锁交接。
+    private var processListClients = 0
+    private let clientLock = NSLock()
+    /// 探出卡片的滞回状态,只在主线程碰。
+    private var attentionTracker = AttentionTracker()
 
     func start() {
         guard !started else { return }
         started = true
         startTimer()
         startGLMPolling()
+        startPulseWiring()
+    }
+
+    /// 声音律动:设置里的开关控制,显示在每块屏的左下角,不占贴边卡片。
+    private func startPulseWiring() {
+        CardSettings.shared.$pulseEnabled
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] on in
+                if on { self?.pulseSampler.start() } else { self?.pulseSampler.stop() }
+            }
+            .store(in: &glmBag)
     }
 
     /// ⌘R 手动刷新。
     func sampleNow() {
         queue.async { [weak self] in self?.performSample() }
         fetchGLMPlan()
+    }
+
+    /// 有界面要画完整进程表了。从 0 变 1 时立刻补一次采样,避免面板先空一拍。
+    func acquireProcessList() {
+        clientLock.lock()
+        processListClients += 1
+        let becameNeeded = processListClients == 1
+        clientLock.unlock()
+        if becameNeeded { queue.async { [weak self] in self?.performSample() } }
+    }
+
+    func releaseProcessList() {
+        clientLock.lock()
+        processListClients = max(0, processListClients - 1)
+        clientLock.unlock()
+    }
+
+    private var wantsProcessList: Bool {
+        clientLock.lock()
+        defer { clientLock.unlock() }
+        return processListClients > 0
     }
 
     private func startTimer() {
@@ -87,31 +136,40 @@ final class MonitorStore: ObservableObject {
 
     private func performSample() {
         let processSample = processSampler.sample()
-        let systemSnapshot = systemSampler.sample(now: processSample.date)
-        let netSnapshot = networkSampler.sample(now: processSample.date)
-        let ioSnapshot = diskIOSampler.sample(now: processSample.date)
-        // 首个周期全量读;之后电池约 10s、卷与 IP 约 30s 才重读一次(按 2s 间隔计)。
-        if tick % 5 == 0 { cachedBattery = BatteryReader.read() }
-        if tick % 15 == 0 {
+        let digest = processSampler.digest(of: processSample.processes)
+        let now = processSample.date
+        let systemSnapshot = systemSampler.sample(now: now)
+        let netSnapshot = networkSampler.sample(now: now)
+        let ioSnapshot = diskIOSampler.sample(now: now)
+        // 电池约 10s、卷与 IP 约 30s 重读一次,跟刷新间隔无关。
+        if lastBatteryAt.map({ now.timeIntervalSince($0) >= 10 }) ?? true {
+            cachedBattery = BatteryReader.read()
+            lastBatteryAt = now
+        }
+        if lastVolumeAt.map({ now.timeIntervalSince($0) >= 30 }) ?? true {
             cachedVolumes = DiskReader.volumes()
             cachedIPs = LocalIPReader.addresses()
+            lastVolumeAt = now
         }
-        tick &+= 1
         let batteryInfo = cachedBattery
         let volumeList = cachedVolumes
         let ipList = cachedIPs
+        // 没人看进程表时不把整张表送上主线程。
+        let listed = wantsProcessList ? processSample.processes : nil
         DispatchQueue.main.async { [weak self] in
-            self?.apply(processSample: processSample, system: systemSnapshot,
+            self?.apply(processes: listed, digest: digest, system: systemSnapshot,
                         net: netSnapshot, io: ioSnapshot, battery: batteryInfo,
                         volumes: volumeList, localIPs: ipList)
         }
     }
 
-    private func apply(processSample ps: ProcessSample, system snapshot: SystemSnapshot,
+    private func apply(processes listed: [ProcInfo]?, digest processDigest: ProcessDigest,
+                       system snapshot: SystemSnapshot,
                        net netSnapshot: NetSnapshot, io ioSnapshot: DiskIOSnapshot,
                        battery batteryInfo: BatteryInfo?,
                        volumes volumeList: [VolumeInfo], localIPs ipList: [LocalIPReader.Address]) {
-        processes = ps.processes
+        if let listed { processes = listed }
+        if digest != processDigest { digest = processDigest }
         system = snapshot
         net = netSnapshot
         diskIO = ioSnapshot
@@ -137,6 +195,49 @@ final class MonitorStore: ObservableObject {
 
         ioWriteHistory.append(ioSnapshot.writeBytesPerSec)
         if ioWriteHistory.count > historyLimit { ioWriteHistory.removeFirst(ioWriteHistory.count - historyLimit) }
+
+        notePeak(cpu: snapshot.cpuPercent, name: processDigest.busiestName, at: snapshot.sampleDate)
+        let levels = makeDashLevels(system: snapshot, net: netSnapshot, io: ioSnapshot,
+                                    battery: batteryInfo, digest: processDigest)
+        if dashLevels != levels { dashLevels = levels }
+        attentionTracker.noteCPU(snapshot.cpuPercent)
+        publishAttention()
+    }
+
+    private func notePeak(cpu: Double, name: String?, at: Date) {
+        guard cpu > 0 else { return }
+        if let peak = dailyPeak, Calendar.current.isDate(peak.at, inSameDayAs: at) {
+            guard cpu > peak.cpuPercent else { return }
+        }
+        dailyPeak = DailyPeak(cpuPercent: cpu, processName: name, at: at)
+    }
+
+    private func makeDashLevels(system snapshot: SystemSnapshot, net netSnapshot: NetSnapshot,
+                                io ioSnapshot: DiskIOSnapshot, battery batteryInfo: BatteryInfo?,
+                                digest processDigest: ProcessDigest) -> DashLevels {
+        let memory = snapshot.memoryTotalBytes > 0
+            ? Double(snapshot.memoryUsedBytes) / Double(snapshot.memoryTotalBytes) : 0
+        let disk = volumes.first?.usedFraction ?? 0
+        let glmUsed = glmPlan?.fiveHour.map { 1 - $0.remainingPercent / 100 }
+        let java = min(1, Double(processDigest.javaMemoryBytes) / (2 * 1_073_741_824))
+        return DashLevels(
+            cpu: DashLevels.bucket(snapshot.cpuPercent / 100),
+            memory: DashLevels.bucket(memory),
+            network: DashLevels.bucket(DashLevels.traffic(netSnapshot.inPerSec)),
+            disk: DashLevels.bucket(disk),
+            io: DashLevels.bucket(DashLevels.traffic(ioSnapshot.totalBytesPerSec)),
+            battery: DashLevels.bucket((batteryInfo?.percent ?? 100) / 100),
+            glm: DashLevels.bucket(glmUsed ?? 0),
+            java: DashLevels.bucket(java))
+    }
+
+    /// 套餐回调和主采样共用。CPU 热计数只在 apply 里记。
+    private func publishAttention() {
+        let next = attentionTracker.resolve(
+            battery: battery,
+            glmRemaining: glmPlan?.fiveHour?.remainingPercent,
+            enabled: Set(CardSettings.shared.cards))
+        if attention != next { attention = next }
     }
 
     /// 强制退出(SIGKILL)。其他用户的进程会失败,由调用方展示错误。
@@ -167,12 +268,19 @@ final class MonitorStore: ObservableObject {
     func fetchGLMPlan() {
         let key = CardSettings.shared.glmApiKey
         guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            if glmPlan != nil { DispatchQueue.main.async { self.glmPlan = nil } }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let had = self.glmPlan != nil || self.attention == .glm
+                if self.glmPlan != nil { self.glmPlan = nil }
+                if had { self.publishAttention() }
+            }
             return
         }
         GLMPlanReader.fetch(apiKey: key) { [weak self] status in
-            guard let self, status != self.glmPlan else { return }
-            self.glmPlan = status
+            guard let self else { return }
+            let changed = status != self.glmPlan
+            if changed { self.glmPlan = status }
+            if changed || self.attention == .glm { self.publishAttention() }
         }
     }
 }

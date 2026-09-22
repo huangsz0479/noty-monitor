@@ -20,18 +20,25 @@ enum DockPanelKind: String, CaseIterable, Identifiable {
 
 enum EdgeDockState: Equatable {
     case rest
+    /// 异常时只探出这一张卡,窗口比扇形小,不挡整条屏幕边缘。
+    case peek(DockPanelKind)
     case fan
     case expanded(DockPanelKind)
 
     var rank: Int {
         switch self {
         case .rest: return 0
-        case .fan: return 1
-        case .expanded: return 2
+        case .peek: return 1
+        case .fan: return 2
+        case .expanded: return 3
         }
     }
     var expandedKind: DockPanelKind? {
         if case .expanded(let kind) = self { return kind }
+        return nil
+    }
+    var peekKind: DockPanelKind? {
+        if case .peek(let kind) = self { return kind }
         return nil
     }
 }
@@ -41,7 +48,8 @@ final class EdgeDockModel: ObservableObject {
     @Published var edge: DockEdge
     /// hover 的那张卡:拉高并把具体数值亮出来(hover,不是 click;click 仍开详情面板)。
     @Published var hoveredCard: DockPanelKind?
-    @Published var revealTick = 0       // bumped to restage the fan animation
+    /// 扇形正在按入场的相反顺序收回。state 仍停在 .fan,列才不会被提前卸掉。
+    @Published var closing = false
     @Published var fanHeight: CGFloat = 0   // 卡片列实测自然高度
 
     init(edge: DockEdge) { self.edge = edge }
@@ -71,6 +79,22 @@ enum DockGeom {
     /// 卡片向屏幕边缘外多画的一段,防止倾斜时在贴边处露缝。
     static let bleed: CGFloat = 14
     static let leanDegrees: Double = 3.0
+    /// 扇形卡片依次进出的间隔。退场用同一间隔、相反的顺序。
+    static let stageInterval: Double = 0.026
+    /// 单张卡片弹簧。临界阻尼,response 就是落到贴边的时间,没有回弹把卡片又露出来。
+    static let stageSpring: TimeInterval = 0.22
+    /// 退场时最右边那张(进程)开始收回的时刻。
+    static var fanExitLastDelay: TimeInterval {
+        Double(EdgeDockCards.cards.count) * stageInterval
+    }
+    /// 小圆点在进程卡落到贴边之后再亮。弹簧没走完就亮,看起来就是提前。
+    static var pillRevealDelay: TimeInterval {
+        fanExitLastDelay + stageSpring
+    }
+    /// 窗口缩回:进程卡落定、小圆点已经在角落里。
+    static var fanExitDuration: TimeInterval {
+        pillRevealDelay
+    }
     /// pill 停靠在右下角,避开原版 noty 在右边缘中部的默认位置。
     static let pillBottomMargin: CGFloat = 16
 
@@ -88,10 +112,10 @@ enum DockGeom {
     static let expandedWidth: CGFloat = 332
     static let panelContentWidth: CGFloat = 264
 
-    /// 进程表三列需要宽纸,Java 的 JVM 列表更宽(标签是完整类名);其余面板维持窄条。
+    /// Java 的 JVM 列表要宽纸(标签是完整类名);贴边进程面板只放前几名,窄一档。
     static func panelWidth(_ kind: DockPanelKind) -> CGFloat {
         switch kind {
-        case .processes: return 480
+        case .processes: return 360
         case .java: return 560
         default: return panelContentWidth
         }
@@ -102,7 +126,7 @@ enum DockGeom {
     }
     static func panelHeight(_ kind: DockPanelKind) -> CGFloat {
         switch kind {
-        case .cpu: return 330
+        case .cpu: return 368
         case .memory: return 366
         case .network: return 398
         case .disk: return 300
@@ -110,7 +134,7 @@ enum DockGeom {
         case .battery: return 220
         case .glm: return 330
         case .java: return 420
-        case .processes: return 560
+        case .processes: return 440
         }
     }
 }
@@ -201,11 +225,27 @@ final class EdgeDockController: NSObject {
     private var lastPointer = NSEvent.mouseLocation
     private var exitWork: DispatchWorkItem?     // 防抖:确认指针真的离开了
     private var shrinkWork: DispatchWorkItem?   // 收起动画播完后再缩回小条
+    /// 当前该探出的卡。nil 时解除"用户已经看过"的抑制。
+    private var attentionKind: DockPanelKind?
+    /// 用户从探出的卡走进来看过之后,这次异常不再反复探出,直到条件解除。
+    private var peekSuppressed = false
+    /// 探出的瞬间面板会变大,可能正好盖住鼠标而误触发 mouseEntered。
+    /// 这一小段时间内不把 peek 升级成整列扇形。
+    private var suppressFanPromotionUntil = Date.distantPast
 
     weak var manager: EdgeDockManager?
 
     /// 永久展开开启时,静止态就是 .fan——卡片常驻,hover 只在收起时有意义。
     private var restingState: EdgeDockState { CardSettings.shared.alwaysShown ? .fan : .rest }
+
+    /// 没人看的时候该停在哪:永久展开是扇形,有异常且用户还没看过则探出那一张,否则小圆点。
+    private var quietState: EdgeDockState {
+        if restingState == .fan { return .fan }
+        if let kind = attentionKind, !peekSuppressed, EdgeDockCards.cards.contains(kind) {
+            return .peek(kind)
+        }
+        return .rest
+    }
 
     var screen: NSScreen? {
         NSScreen.screens.first {
@@ -238,9 +278,29 @@ final class EdgeDockController: NSObject {
         switch model.state {
         case .rest where restingState == .fan:
             setState(.fan)
+        case .peek where restingState == .fan:
+            setState(.fan)
         case .fan where restingState == .rest:
             if hotZone.contains(NSEvent.mouseLocation) { startIdleWatch() }
-            else { setState(.rest) }
+            else { setState(quietState) }
+        default:
+            break
+        }
+    }
+
+    /// 采样侧判定该探出(或收回)哪张卡。扇形和详情开着时不打断。
+    func applyAttention(_ kind: DockPanelKind?) {
+        if kind == nil { peekSuppressed = false }
+        attentionKind = kind
+        guard restingState != .fan else { return }
+        switch model.state {
+        case .rest, .peek:
+            let target = quietState
+            guard model.state != target else { return }
+            if target.peekKind != nil {
+                suppressFanPromotionUntil = Date().addingTimeInterval(0.45)
+            }
+            setState(target)
         default:
             break
         }
@@ -250,7 +310,7 @@ final class EdgeDockController: NSObject {
     func applyEdge(_ edge: DockEdge) {
         guard edge != model.edge else { return }
         model.hoveredCard = nil
-        setState(restingState)
+        setState(quietState)
         model.edge = edge
         layout()
     }
@@ -279,8 +339,6 @@ final class EdgeDockController: NSObject {
             frame = verticalFrame(state, full: full, vis: vis, fromRight: false)
         case .bottomRight:
             frame = bottomFrame(state, full: full, fromRight: true)
-        case .bottomLeft:
-            frame = bottomFrame(state, full: full, fromRight: false)
         }
         // display:false——不在点击处理里强制同步重绘(那一帧本来就被
         // resize + SwiftUI 重排占满,同步绘制正是点击瞬间掉帧的来源)。
@@ -297,6 +355,10 @@ final class EdgeDockController: NSObject {
             let x = fromRight ? full.maxX - DockGeom.pillWidth : full.minX
             return NSRect(x: x, y: round(vis.minY + DockGeom.pillBottomMargin),
                           width: DockGeom.pillWidth, height: DockGeom.pillHeight)
+        case .peek:
+            // 与扇形同一套原点(y = 可见区底边),pill 的屏幕位置公式才对得上,
+            // 探出和收回时小圆点不挪窝。高度只够一张卡,不铺满整条边缘。
+            return peekFrame(full: full, vis: vis, fromRight: fromRight, vertical: true)
         case .fan:
             // fan 与 expanded 同尺寸:首次拉出面板时窗口零 resize,状态可以
             // 同步发布(没有 resize/挂载的同拍竞争)。多出来的区域透明且点击穿透。
@@ -322,9 +384,12 @@ final class EdgeDockController: NSObject {
             // rest 面板 = pill 内容 + 内边距,恰好装下。子视图一旦溢出面板,
             // SwiftUI 的对齐落点和对得齐时不同,pill 会先偏一点再弹回。
             let w = size.width + DockGeom.bottomCornerInset + 1
-            let h = size.height + 1
+            let h = size.height
             let x = fromRight ? full.maxX - w : full.minX
             return NSRect(x: x, y: full.minY, width: w, height: h)
+        case .peek:
+            // 下角不读 vis:探出的卡贴屏幕真底边,和静止 pill 同一个 y。
+            return peekFrame(full: full, vis: full, fromRight: fromRight, vertical: false)
         case .fan:
             // 与展开态同尺寸(理由同 verticalFrame 的 .fan 注释)。
             let w = DockGeom.tabWidth + DockGeom.maxPanelWidth
@@ -340,11 +405,30 @@ final class EdgeDockController: NSObject {
         }
     }
 
+    /// 只装下一张探出的卡。垂直时贴可见区底边,下角时贴屏幕真底边,和静止 pill 对齐。
+    private func peekFrame(full: NSRect, vis: NSRect, fromRight: Bool, vertical: Bool) -> NSRect {
+        if vertical {
+            let w = DockGeom.tabWidth + DockGeom.bleed + 20
+            let h = min(vis.height, 360)
+            let x = fromRight ? full.maxX - w : full.minX
+            return NSRect(x: x, y: vis.minY, width: w, height: h)
+        }
+        let pill = DockGeom.horizontalPillSize
+        let w = max(pill.width + DockGeom.bottomCornerInset + 1,
+                    DockGeom.tabWidth + DockGeom.cogSize + DockGeom.cogGap
+                        + DockGeom.bottomCornerInset + 28)
+        let h: CGFloat = 240
+        let x = fromRight ? full.maxX - w : full.minX
+        return NSRect(x: x, y: full.minY, width: w, height: h)
+    }
+
     // MARK: Transitions
 
     private func setState(_ new: EdgeDockState) {
         let old = model.state
         guard old != new else { return }
+        // 退场已经在播,再来一次会把收尾定时器取消掉,卡片就停在半路。
+        if new == .rest, model.closing, old.expandedKind == nil { return }
         shrinkWork?.cancel(); shrinkWork = nil
 
         if new.rank >= old.rank {
@@ -353,9 +437,8 @@ final class EdgeDockController: NSObject {
             // 的同拍竞争,状态同步发布——点击下一拍就动起来,没有死区。
             // (旧方案"resize 先渲染两帧再发布"的整个延迟机制已随之删除。)
             layout(for: new)
-            if new == .fan {
+            if new == .fan || new.peekKind != nil {
                 model.state = new
-                model.revealTick &+= 1
             } else {
                 // 临界阻尼(1.0):同样快,但没有过冲回弹——欠阻尼弹簧
                 // 收尾要过冲 1~2 次,在大面板上就是肉眼可见的抖动。
@@ -364,13 +447,26 @@ final class EdgeDockController: NSObject {
                 }
             }
         } else {
-            // 先在全尺寸上播完退出动画,再把面板缩回小条。
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
-                self.model.state = new
+            // 扇形退回小圆点:不要包一层 withAnimation。入场是每张卡自己的
+            // 延迟弹簧,退场必须走同一条路径才会按相反顺序收回。外层动画会把
+            // 延迟吃掉,看起来就不是入场的倒放。
+            let cardsOnly = new == .rest && old.expandedKind == nil
+            if cardsOnly {
+                // 先只翻 closing:卡片还在树上,按相反顺序收回。播完再落到 .rest 并缩窗。
+                if !model.closing {
+                    model.closing = true
+                    let work = DispatchWorkItem { [weak self] in self?.finishClose() }
+                    shrinkWork = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + DockGeom.fanExitDuration, execute: work)
+                }
+            } else {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+                    self.model.state = new
+                }
+                let work = DispatchWorkItem { [weak self] in self?.layout() }
+                shrinkWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
             }
-            let work = DispatchWorkItem { [weak self] in self?.layout() }
-            shrinkWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
         }
 
         if new.expandedKind != nil {
@@ -378,8 +474,27 @@ final class EdgeDockController: NSObject {
         } else {
             removeKeyMonitor(); removeOutsideMonitor()
         }
-        // 只有高于静止态才需要"无人看管自动收起"的轮询。
-        if new.rank > restingState.rank { startIdleWatch() } else { stopIdleWatch() }
+        // 扇形和详情才需要"无人看管自动收起"。探出的卡是故意留着的,不收。
+        switch new {
+        case .fan where restingState != .fan:
+            startIdleWatch()
+        case .expanded:
+            startIdleWatch()
+        default:
+            stopIdleWatch()
+        }
+    }
+
+    /// 退场播完:这时卡片已经回到贴边,再缩成小圆点。
+    private func finishClose() {
+        guard model.closing else { return }
+        // 先落到 .rest 再清 closing。顺序反了的话,中间一帧会把卡片重新判成展开,闪一下。
+        model.state = .rest
+        model.closing = false
+        layout()
+        stopIdleWatch()
+        removeKeyMonitor()
+        removeOutsideMonitor()
     }
 
     private func noteActivity() { lastActivity = Date() }
@@ -422,7 +537,7 @@ final class EdgeDockController: NSObject {
             return NSRect(x: f.maxX - depth, y: f.minY, width: depth, height: f.height)
         case .left:
             return NSRect(x: f.minX, y: f.minY, width: depth, height: f.height)
-        case .bottomLeft, .bottomRight:
+        case .bottomRight:
             return NSRect(x: f.minX, y: f.minY, width: f.width, height: depth)
         }
     }
@@ -430,10 +545,31 @@ final class EdgeDockController: NSObject {
     func pointerEntered() {
         noteActivity()
         exitWork?.cancel(); exitWork = nil
-        shrinkWork?.cancel(); shrinkWork = nil
-        guard model.state == .rest else { layout(); return }
-        manager?.dockDidActivate(self)
-        setState(.fan)
+        // 退场时面板还是全尺寸,布局一变就会误报「鼠标进来」。
+        // 只有光标真的回到卡片热区,才取消收回。
+        let backOnCards = hotZone.contains(NSEvent.mouseLocation)
+        if model.closing && !backOnCards {
+            // 继续收。
+        } else {
+            shrinkWork?.cancel(); shrinkWork = nil
+            if model.closing {
+                model.closing = false
+                if model.state == .fan { startIdleWatch() }
+            }
+        }
+        // 探出面板变大时可能刚好盖住光标,这一小段不升级成整列。
+        if Date() < suppressFanPromotionUntil { return }
+        switch model.state {
+        case .rest:
+            manager?.dockDidActivate(self)
+            setState(.fan)
+        case .peek:
+            peekSuppressed = true
+            manager?.dockDidActivate(self)
+            setState(.fan)
+        default:
+            layout()
+        }
     }
 
     func pointerExited() {
@@ -444,7 +580,7 @@ final class EdgeDockController: NSObject {
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.model.state == .fan else { return }
             if !self.hotZone.contains(NSEvent.mouseLocation) {
-                self.setState(self.restingState)
+                self.setState(self.quietState)
             }
         }
         exitWork = work
@@ -475,18 +611,18 @@ final class EdgeDockController: NSObject {
             setState(.fan)
             NSApp.deactivate()
         } else {
-            setState(restingState)
+            setState(quietState)
         }
     }
 
-    /// 整个收回到静止态(永久展开时即保持扇形)。
+    /// 整个收回到静止态(永久展开时即保持扇形,有未看过的异常则探出那一张)。
     func dismiss() {
         let wasExpanded = model.state.expandedKind != nil
-        setState(restingState)
+        setState(quietState)
         if wasExpanded { NSApp.deactivate() }
     }
 
-    func collapseToRest() { setState(restingState) }
+    func collapseToRest() { setState(quietState) }
 
     // MARK: Key & outside monitoring
 
@@ -550,6 +686,8 @@ final class EdgeDockController: NSObject {
 /// 每块目标屏维护一个贴边 dock,屏幕增减或参数变化时重建。
 final class EdgeDockManager {
     private(set) var docks: [CGDirectDisplayID: EdgeDockController] = [:]
+    /// 律动不占卡片,每块屏的左下角一块独立频谱。
+    private var pulseCorners: [CGDirectDisplayID: PulseCornerController] = [:]
     private var bag = Set<AnyCancellable>()
 
     init() {
@@ -565,6 +703,18 @@ final class EdgeDockManager {
                 self?.docks.values.forEach { $0.applyEdge(edge) }
             }
             .store(in: &bag)
+        MonitorStore.shared.$attention
+            .receive(on: RunLoop.main)
+            .sink { [weak self] kind in
+                self?.docks.values.forEach { $0.applyAttention(kind) }
+            }
+            .store(in: &bag)
+        CardSettings.shared.$pulseEnabled
+            .receive(on: RunLoop.main)
+            .sink { [weak self] shown in
+                self?.pulseCorners.values.forEach { $0.setShown(shown) }
+            }
+            .store(in: &bag)
         rebuild()
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -578,16 +728,95 @@ final class EdgeDockManager {
         for id in Array(docks.keys) where !ids.contains(id) {
             docks.removeValue(forKey: id)
         }
+        for id in Array(pulseCorners.keys) where !ids.contains(id) {
+            pulseCorners.removeValue(forKey: id)
+        }
         for id in ids where docks[id] == nil {
             let dock = EdgeDockController(displayID: id)
             dock.manager = self
+            dock.applyAttention(MonitorStore.shared.attention)
             docks[id] = dock
         }
+        let pulseOn = CardSettings.shared.pulseEnabled
+        for id in ids where pulseCorners[id] == nil {
+            let corner = PulseCornerController(displayID: id)
+            corner.setShown(pulseOn)
+            pulseCorners[id] = corner
+        }
         docks.values.forEach { $0.layout() }
+        pulseCorners.values.forEach { $0.layout() }
     }
 
     /// 同一时间只展开一个——指针进入哪个屏就收起其他的。
     func dockDidActivate(_ active: EdgeDockController) {
         for d in docks.values where d !== active { d.collapseToRest() }
+    }
+}
+
+// MARK: - 左下角律动
+
+/// 不参与贴边卡片。透明、不吃点击,条从屏幕真底边往上长。
+final class PulseCornerPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    init() {
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+                   styleMask: [.borderless, .nonactivatingPanel],
+                   backing: .buffered, defer: false)
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        isMovable = false
+        hidesOnDeactivate = false
+        isReleasedWhenClosed = false
+        ignoresMouseEvents = true
+        level = .statusBar
+        collectionBehavior = [.stationary, .ignoresCycle, .canJoinAllSpaces, .fullScreenAuxiliary]
+    }
+}
+
+final class PulseCornerController {
+    let displayID: CGDirectDisplayID
+    private let panel = PulseCornerPanel()
+
+    /// 比设置齿轮(24pt)略高一档,条再高也不超出这块玻璃。
+    private static let size = CGSize(width: 200, height: 40)
+
+    private var screen: NSScreen? {
+        NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
+        }
+    }
+
+    init(displayID: CGDirectDisplayID) {
+        self.displayID = displayID
+        let host = EdgeDockHostingView(rootView: PulseCornerView())
+        host.autoresizingMask = [.width, .height]
+        panel.contentView = host
+        layout()
+    }
+
+    deinit { panel.orderOut(nil) }
+
+    func layout() {
+        guard let screen else { return }
+        let full = screen.frame
+        let size = Self.size
+        // 贴屏幕真底边、靠左,盖在 Dock 区域上,和右下角贴边同一条底边。
+        panel.setFrame(NSRect(x: full.minX + 8,
+                              y: full.minY,
+                              width: size.width,
+                              height: size.height),
+                       display: false, animate: false)
+    }
+
+    func setShown(_ shown: Bool) {
+        if shown {
+            layout()
+            panel.orderFrontRegardless()
+        } else {
+            panel.orderOut(nil)
+        }
     }
 }

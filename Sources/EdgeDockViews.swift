@@ -42,13 +42,18 @@ struct EdgeDockRootView: View {
     @ObservedObject var settings = CardSettings.shared
 
     private var edge: DockEdge { dock.edge }
+    /// 卡片收回途中先别亮;等到最后一张基本到位再亮。展开时必须灭掉。
+    @State private var pillAfterCards = false
+    private var pillShown: Bool {
+        if dock.state == .rest { return true }
+        return dock.closing && pillAfterCards
+    }
 
     private var rootAlignment: Alignment {
         switch edge {
         case .right:       return .topTrailing
         case .left:        return .topLeading
         case .bottomRight: return .bottomTrailing
-        case .bottomLeft:  return .bottomLeading
         }
     }
 
@@ -63,14 +68,16 @@ struct EdgeDockRootView: View {
 
                 if dock.state != .rest {
                     MetricFanColumn(dock: dock, controller: controller, store: store)
+                        .transition(.identity)
                         .padding(fanPadding(panelHeight: h, panelWidth: w))
                 }
 
                 MonitorPillView(store: store, edge: edge)
                     .padding(pillPadding(panelHeight: h, panelWidth: w))
                     .transaction { $0.animation = nil }
-                    .opacity(dock.state == .rest ? 1 : 0)
-                    .animation(.easeInOut(duration: 0.20).delay(dock.state == .rest ? 0.12 : 0), value: dock.state)
+                    .opacity(pillShown ? 1 : 0)
+                    // 展开时立刻灭掉。淡出要 0.12s,第一张卡已经从圆点上冒出来,看起来就是闪。
+                    .animation(pillShown ? .easeOut(duration: 0.1) : nil, value: pillShown)
 
                 // 最后声明,盖住卡片列,贴屏幕边缘。
                 if let kind = dock.state.expandedKind {
@@ -83,8 +90,17 @@ struct EdgeDockRootView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: rootAlignment)
         }
-        .animation(.spring(response: 0.30, dampingFraction: 0.9), value: dock.state != .rest)
-        .animation(.snappy(duration: 0.3), value: dock.hoveredCard)
+        .onChange(of: dock.closing) { _, closing in
+            if closing {
+                // 上一轮留下的标记会让小圆点在第二次退场一开始就亮。先清掉,再等进程卡落定。
+                pillAfterCards = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + DockGeom.pillRevealDelay) {
+                    if dock.closing || dock.state == .rest { pillAfterCards = true }
+                }
+            } else if dock.state != .rest {
+                pillAfterCards = false
+            }
+        }
     }
 
     /// 面板生长时 pill 停在屏幕原位不动:各边缘用各自的边距公式锁位。
@@ -98,11 +114,8 @@ struct EdgeDockRootView: View {
             // 下角:rest/fan 面板共享同一条角落边,pill 恒贴角即可全程不挪位。
             // 不能用随面板宽度变化的公式——收起动画的 0.45s 里面板还是
             // 全宽,会把 pill 算到卡片排那端,弹回角落时肉眼可见地跳一下。
-            return EdgeInsets(top: 0, leading: 0, bottom: 1,
+            return EdgeInsets(top: 0, leading: 0, bottom: 0,
                               trailing: DockGeom.bottomCornerInset + 1)
-        case .bottomLeft:
-            return EdgeInsets(top: 0, leading: DockGeom.bottomCornerInset + 1,
-                              bottom: 1, trailing: 0)
         }
     }
 
@@ -111,11 +124,8 @@ struct EdgeDockRootView: View {
         case .right, .left:
             return EdgeInsets(top: fanTop(panelHeight: ph), leading: 0, bottom: 0, trailing: 0)
         case .bottomRight:
-            // 卡片一排贴着右下角站在底边上。
-            return EdgeInsets(top: 0, leading: 0, bottom: 2, trailing: DockGeom.bottomCornerInset)
-        case .bottomLeft:
-            // 镜像:贴着左下角。
-            return EdgeInsets(top: 0, leading: DockGeom.bottomCornerInset, bottom: 2, trailing: 0)
+            // 卡片一排贴着右下角,底边与屏幕底边齐平。
+            return EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: DockGeom.bottomCornerInset)
         }
     }
 
@@ -127,7 +137,7 @@ struct EdgeDockRootView: View {
         case .right, .left:
             return EdgeInsets(top: panelTop(kind: kind, panelHeight: ph), leading: 0,
                               bottom: 0, trailing: 0)
-        case .bottomLeft, .bottomRight:
+        case .bottomRight:
             return EdgeInsets()
         }
     }
@@ -141,13 +151,21 @@ struct EdgeDockRootView: View {
     /// 锚点列高:与 hover 无关。"悬停显示数值"只伸缩被悬停的那张卡本身,
     /// 整列顶端和详情面板的弹出位都用纯标题的列高计算——否则点击后指针
     /// 离开卡片,列高缩回,整列连同面板当场滑一下(肉眼可见的"跳")。
+    /// 探出时只排那一张,并且数值算进高度(它一直亮着)。
+    private var layoutCards: [DockPanelKind] {
+        if let kind = dock.state.peekKind, EdgeDockCards.cards.contains(kind) { return [kind] }
+        return EdgeDockCards.cards
+    }
+
     private var anchorStack: CGFloat {
-        let values = Dictionary(uniqueKeysWithValues: EdgeDockCards.cards.map {
+        let values = Dictionary(uniqueKeysWithValues: layoutCards.map {
             ($0, CardMetrics.value(for: $0, store: store))
         })
-        let titleOnly = CardMetrics.displayValues(values, hovered: nil,
-                                                  hoverReveals: settings.hoverRevealsValue)
-        return CardMetrics.totalHeight(values: titleOnly)
+        // 探出的卡数值常显,高度按带数值算;其余时候仍按纯标题,避免悬停把整列顶走。
+        let titleOnly = CardMetrics.displayValues(
+            values, hovered: nil,
+            hoverReveals: settings.hoverRevealsValue && dock.state.peekKind == nil)
+        return CardMetrics.totalHeight(values: titleOnly, cards: layoutCards)
             + DockGeom.cogGap + DockGeom.cogSize
     }
 
@@ -171,9 +189,16 @@ struct EdgeDockRootView: View {
 struct MonitorPillView: View {
     @ObservedObject var store: MonitorStore
     var edge: DockEdge = .right
+    /// 异常那根彩条的呼吸。视图一直在树上,动画只开一次。
+    @State private var pulse = false
 
     var body: some View {
         pillContent
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                    pulse = true
+                }
+            }
             .frame(width: edge.isBottom ? DockGeom.horizontalPillSize.width : DockGeom.pillWidth,
                    height: edge.isBottom ? DockGeom.horizontalPillSize.height : nil)
             .background(
@@ -194,24 +219,29 @@ struct MonitorPillView: View {
         if edge.isBottom {
             HStack(spacing: DockGeom.dashGap) {
                 ForEach(EdgeDockCards.cards) { kind in
-                    dash(kind.palette.dash)
+                    dash(kind)
                 }
             }
             .padding(.horizontal, DockGeom.pillPad)
         } else {
             VStack(spacing: DockGeom.dashGap) {
                 ForEach(EdgeDockCards.cards) { kind in
-                    dash(kind.palette.dash)
+                    dash(kind)
                 }
             }
             .padding(.vertical, DockGeom.pillPad)
         }
     }
 
-    private func dash(_ color: Color) -> some View {
-        RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-            .fill(color)
+    /// 用量越高色越实;被点名的那根在两档之间呼吸,直到卡片自己探出来。
+    private func dash(_ kind: DockPanelKind) -> some View {
+        let alerting = store.attention == kind
+        let level = store.dashLevels.level(for: kind)
+        return RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+            .fill(kind.palette.dash)
             .frame(width: DockGeom.dashWidth, height: DockGeom.dashHeight)
+            .opacity(alerting ? (pulse ? 1 : 0.38) : (0.32 + 0.68 * level))
+            .animation(.easeInOut(duration: 0.35), value: level)
     }
 }
 
@@ -225,10 +255,16 @@ struct MetricFanColumn: View {
 
     @State private var appeared = false
 
-    private var isRevealed: Bool { dock.state != .rest && appeared }
+    private var isRevealed: Bool { dock.state != .rest && appeared && !dock.closing }
+
+    /// 探出时扇形里只留那一张。
+    private var shownCards: [DockPanelKind] {
+        if let kind = dock.state.peekKind, EdgeDockCards.cards.contains(kind) { return [kind] }
+        return EdgeDockCards.cards
+    }
 
     private var valuesById: [DockPanelKind: String] {
-        Dictionary(uniqueKeysWithValues: EdgeDockCards.cards.map {
+        Dictionary(uniqueKeysWithValues: shownCards.map {
             ($0, CardMetrics.value(for: $0, store: store))
         })
     }
@@ -240,20 +276,20 @@ struct MetricFanColumn: View {
     private var displayValues: [DockPanelKind: String] {
         CardMetrics.displayValues(valuesById, hovered: dock.hoveredCard,
                                   hoverReveals: settings.hoverRevealsValue,
-                                  pinned: dock.state.expandedKind)
+                                  pinned: dock.state.expandedKind ?? dock.state.peekKind)
     }
 
     private var layouts: [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] {
-        CardMetrics.layouts(values: displayValues)
+        CardMetrics.layouts(values: displayValues, cards: shownCards)
     }
 
     private var totalHeight: CGFloat {
-        CardMetrics.totalHeight(values: displayValues)
+        CardMetrics.totalHeight(values: displayValues, cards: shownCards)
     }
 
     /// 下缘整排的总宽(卡片宽度恒定,叠压量相同)。
     private var rowWidth: CGFloat {
-        let n = CGFloat(EdgeDockCards.cards.count)
+        let n = CGFloat(shownCards.count)
         return n * DockGeom.tabWidth - max(0, n - 1) * DockGeom.tabLap
     }
 
@@ -276,17 +312,9 @@ struct MetricFanColumn: View {
                 verticalColumn
             case .bottomRight:
                 bottomColumn(fromRight: true)
-            case .bottomLeft:
-                bottomColumn(fromRight: false)
             }
         }
-        .animation(.snappy(duration: 0.3), value: dock.hoveredCard)
-        .animation(.snappy(duration: 0.3), value: layouts.map { $0.height })
         .onAppear {
-            DispatchQueue.main.async { appeared = true }
-        }
-        .onChange(of: dock.revealTick) { _, _ in
-            appeared = false
             DispatchQueue.main.async { appeared = true }
         }
         .onChange(of: dock.state) { _, newState in
@@ -308,8 +336,8 @@ struct MetricFanColumn: View {
 
             CogButton { SettingsWindow.shared.show() }
                 .padding(.top, totalHeight + 4)
-                .staged(index: EdgeDockCards.cards.count,
-                        total: EdgeDockCards.cards.count + 1,
+                .staged(index: shownCards.count,
+                        total: shownCards.count + 1,
                         revealed: isRevealed, edge: dock.edge)
 
             // dock 悬挂其上的虚线,就在屏幕边缘上。
@@ -318,6 +346,7 @@ struct MetricFanColumn: View {
                 .foregroundStyle(Color.white.opacity(0.35))
                 .frame(width: 1, height: totalHeight + DockGeom.cogSize + 22)
                 .padding(dock.edge == .left ? .leading : .trailing, 3)
+                .opacity(isRevealed ? 1 : 0)
                 .allowsHitTesting(false)
         }
     }
@@ -330,21 +359,22 @@ struct MetricFanColumn: View {
             ForEach(Array(layouts.enumerated()), id: \.element.kind.id) { idx, item in
                 placedTab(item: item, index: idx)
                     .padding(fromRight ? .trailing : .leading,
-                             CGFloat(EdgeDockCards.cards.count - 1 - idx)
+                             CGFloat(shownCards.count - 1 - idx)
                                  * (DockGeom.tabWidth - DockGeom.tabLap))
             }
 
             CogButton { SettingsWindow.shared.show() }
                 .padding(fromRight ? .trailing : .leading, rowWidth + 4)
-                .staged(index: EdgeDockCards.cards.count,
-                        total: EdgeDockCards.cards.count + 1,
+                .staged(index: shownCards.count,
+                        total: shownCards.count + 1,
                         revealed: isRevealed, edge: dock.edge)
 
             EdgeLine()
                 .stroke(style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
                 .foregroundStyle(Color.white.opacity(0.35))
                 .frame(width: rowWidth + DockGeom.cogSize + 22, height: 1)
-                .padding(.bottom, 3)
+                .padding(.bottom, 0)
+                .opacity(isRevealed ? 1 : 0)
                 .allowsHitTesting(false)
         }
     }
@@ -354,6 +384,7 @@ struct MetricFanColumn: View {
     private func placedTab(item: (kind: DockPanelKind, y: CGFloat, height: CGFloat),
                            index: Int) -> some View {
         tab(item: item, index: index)
+            .animation(.snappy(duration: 0.3), value: item.height)
             .onHover { entering in
                 // 只清掉自己的 hover:跨卡移动时 exit 事件可能晚于下一张的 enter。
                 if entering {
@@ -362,7 +393,7 @@ struct MetricFanColumn: View {
                     dock.hoveredCard = nil
                 }
             }
-            .staged(index: index, total: EdgeDockCards.cards.count + 1,
+            .staged(index: index, total: shownCards.count + 1,
                     revealed: isRevealed, edge: dock.edge)
     }
 }
@@ -427,16 +458,18 @@ enum CardMetrics {
         })
     }
 
-    static func layouts(values: [DockPanelKind: String]) -> [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] {
+    static func layouts(values: [DockPanelKind: String],
+                        cards: [DockPanelKind]? = nil) -> [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] {
         // 未悬停的初始高度整列统一:取"纯标题"最高的那张卡,矮卡补齐到
         // 同一高度(横排旋转的 CPU/I/O 和竖排双字的内存/智谱不再参差);
-        // 悬停的卡在统一高度之上长出数值。
-        let restHeight = EdgeDockCards.cards
+        // 悬停的卡在统一高度之上长出数值。探出时只排被点名的那一张。
+        let order = cards ?? EdgeDockCards.cards
+        let restHeight = order
             .map { measuredHeight(title: $0.rawValue, value: "") }
             .max() ?? 0
         var result: [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] = []
         var y: CGFloat = 0
-        for kind in EdgeDockCards.cards {
+        for kind in order {
             let h = max(measuredHeight(title: kind.rawValue, value: values[kind] ?? ""), restHeight)
             result.append((kind, y, h))
             y += h - DockGeom.tabLap
@@ -444,14 +477,19 @@ enum CardMetrics {
         return result
     }
 
-    static func totalHeight(values: [DockPanelKind: String]) -> CGFloat {
-        guard let last = layouts(values: values).last else { return 0 }
+    static func totalHeight(values: [DockPanelKind: String],
+                            cards: [DockPanelKind]? = nil) -> CGFloat {
+        guard let last = layouts(values: values, cards: cards).last else { return 0 }
         return last.y + last.height
     }
 
     static func value(for kind: DockPanelKind, store: MonitorStore) -> String {
         switch kind {
-        case .cpu: return store.system.cpuPercent.percentText
+        case .cpu:
+            if let name = store.digest.dominantName {
+                return "\(name) \(Int(store.digest.dominantCPU.rounded()))%"
+            }
+            return store.system.cpuPercent.percentText
         case .memory:
             let ratio = store.system.memoryTotalBytes > 0
                 ? Double(store.system.memoryUsedBytes) / Double(store.system.memoryTotalBytes) : 0
@@ -468,10 +506,9 @@ enum CardMetrics {
             }
             return store.glmPlan?.error != nil ? "!" : "—"
         case .java:
-            let jvms = store.processes.filter(\.isJava)
-            guard !jvms.isEmpty else { return "—" }
-            return jvms.reduce(UInt64(0)) { $0 + $1.memoryBytes }.memoryText
-        case .processes: return String(store.processes.count)
+            guard store.digest.javaCount > 0 else { return "—" }
+            return store.digest.javaMemoryBytes.memoryText
+        case .processes: return String(store.digest.count)
         }
     }
 }
@@ -494,7 +531,7 @@ struct MetricTab: View {
         switch edge {
         case .right:  return -DockGeom.leanDegrees
         case .left:   return DockGeom.leanDegrees
-        case .bottomLeft, .bottomRight: return 0
+        case .bottomRight: return 0
         }
     }
 
@@ -663,12 +700,13 @@ struct MetricPanelView: View {
             case .cpu:
                 chartCard(CPUChart(history: store.cpuHistory, tint: kind.palette.dash, ink: kind.palette.ink).frame(height: 76))
                 sectionCaption("负载构成")
-                statRows([
-                    ("用户", store.system.cpuUserPercent.percentText),
-                    ("系统", store.system.cpuSystemPercent.percentText),
-                    ("负载(1 分钟)", store.system.loadAverages.0.loadText),
-                    ("核心 / 已运行", "\(store.system.coreCount) · \(store.system.uptimeSeconds.uptimeText)"),
-                ])
+                statRows(cpuStatRows)
+                if let peak = store.dailyPeak {
+                    Text(peak.sentence)
+                        .font(.caption)
+                        .foregroundStyle(kind.palette.ink.opacity(0.55))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             case .memory:
                 chartCard(MemoryChart(history: store.memHistory,
                                       totalBytes: store.system.memoryTotalBytes,
@@ -747,13 +785,27 @@ struct MetricPanelView: View {
         )
         // 背向停靠边缘让出贴边卡片条的位置,不盖住展开的标签条。
         .padding(panelInset)
+        .background(ProcessListHold(active: kind == .processes || kind == .java))
+    }
+
+    private var cpuStatRows: [(String, String)] {
+        var rows = [
+            ("用户", store.system.cpuUserPercent.percentText),
+            ("系统", store.system.cpuSystemPercent.percentText),
+            ("负载(1 分钟)", store.system.loadAverages.0.loadText),
+            ("核心 / 已运行", "\(store.system.coreCount) · \(store.system.uptimeSeconds.uptimeText)"),
+        ]
+        if let name = store.digest.dominantName {
+            rows.insert(("当前最忙", "\(name) \(store.digest.dominantCPU.percentText)"), at: 0)
+        }
+        return rows
     }
 
     private var panelInset: EdgeInsets {
         switch edge {
         case .right:  return EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: DockGeom.tabWidth)
         case .left:   return EdgeInsets(top: 0, leading: DockGeom.tabWidth, bottom: 0, trailing: 0)
-        case .bottomLeft, .bottomRight: return EdgeInsets(top: 0, leading: 0, bottom: DockGeom.tabWidth, trailing: 0)
+        case .bottomRight: return EdgeInsets(top: 0, leading: 0, bottom: DockGeom.tabWidth, trailing: 0)
         }
     }
 
@@ -846,9 +898,8 @@ struct MetricPanelView: View {
             }
             return store.glmPlan?.error != nil ? "!" : "—"
         case .java:
-            let count = store.processes.filter(\.isJava).count
-            return count > 0 ? "\(count) 个" : "—"
-        case .processes: return "\(store.processes.count)"
+            return store.digest.javaCount > 0 ? "\(store.digest.javaCount) 个" : "—"
+        case .processes: return "\(store.digest.count)"
         }
     }
 
@@ -870,7 +921,7 @@ struct PanelPull: ViewModifier {
         switch edge {
         case .right:       anchor = .trailing; offset = CGSize(width: 24, height: 0)
         case .left:        anchor = .leading;  offset = CGSize(width: -24, height: 0)
-        case .bottomLeft, .bottomRight:
+        case .bottomRight:
                            anchor = .bottom;   offset = CGSize(width: 0, height: 24)
         }
         return content
@@ -970,7 +1021,7 @@ struct JavaPanelContent: View {
     var body: some View {
         VStack(spacing: 8) {
             if jvms.isEmpty {
-                Text("没有正在运行的 Java 进程")
+                Text(store.digest.javaCount == 0 ? "没有正在运行的 Java 进程" : "正在读取…")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -1052,74 +1103,43 @@ struct JavaPanelContent: View {
 
 // MARK: - 进程面板
 
+/// 贴边只回答"这会儿是谁":CPU 和内存各前几名。搜索和全表在完整窗口。
 struct ProcessPanelContent: View {
     @ObservedObject var store: MonitorStore
 
-    @State private var query = ""
-    @State private var onlyMine = false
-    @State private var selectedPID: Int32?
-    @State private var sortOrder = [KeyPathComparator(\ProcInfo.cpuPercent, order: .reverse)]
     @State private var confirmTarget: ProcInfo?
     @State private var killErrorText: String?
 
-    private var filtered: [ProcInfo] {
-        ProcFilter.apply(store.processes, query: query, onlyMine: onlyMine, sortOrder: sortOrder)
+    private var ranked: [ProcInfo] {
+        store.processes.filter { !ProcessDigest.noiseNames.contains($0.name) }
+    }
+    private var topCPU: [ProcInfo] {
+        Array(ranked.sorted { $0.cpuPercent > $1.cpuPercent }.prefix(6))
+    }
+    private var topMemory: [ProcInfo] {
+        Array(ranked.sorted { $0.memoryBytes > $1.memoryBytes }.prefix(6))
     }
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                TextField("搜索", text: $query)
-                    .textFieldStyle(.roundedBorder)
-                Toggle("我的", isOn: $onlyMine)
-                    .toggleStyle(.checkbox)
-                Button {
-                    if let row = filtered.first(where: { $0.id == selectedPID })
-                        ?? store.processes.first(where: { $0.id == selectedPID }) {
-                        confirmTarget = row
-                    }
-                } label: {
-                    Image(systemName: "xmark.octagon.fill")
-                        .foregroundStyle(.white, .red)
+        VStack(alignment: .leading, spacing: 10) {
+            if store.processes.isEmpty {
+                Text(store.digest.count == 0 ? "没有进程" : "正在读取…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 24)
+                Spacer(minLength: 0)
+            } else {
+                rankBlock("CPU", rows: topCPU) { $0.cpuPercent.percentText }
+                rankBlock("内存", rows: topMemory) { $0.memoryBytes.memoryText }
+                Spacer(minLength: 0)
+                Button("打开完整窗口") {
+                    (NSApp.delegate as? AppDelegate)?.openFullWindow()
                 }
-                .disabled(selectedPID == nil)
                 .buttonStyle(.plain)
-                .help("强制退出选中进程")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
-
-            Table(filtered, selection: $selectedPID, sortOrder: $sortOrder) {
-                TableColumn("进程", value: \.name) { row in
-                    Text(row.isJava ? "☕ \(row.displayName)" : row.name)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .contextMenu {
-                            Button("强制退出 \(row.name)", role: .destructive) {
-                                confirmTarget = row
-                            }
-                        }
-                }
-                // 列宽策略:CPU/内存钉死,"进程"吸收全部伸缩。理想宽度必给,
-                // 否则初次布局会按最长进程名的自然宽度铺开、溢出一拍再收缩
-                // (横向滚动条"闪两下"的第二下)。三列最小总宽 ~182pt,任何
-                // 时刻都装得下,横向滚动条从根上没有出现的理由。
-                .width(min: 40, ideal: 200)
-                TableColumn("CPU", value: \.cpuPercent) { row in
-                    Text(row.cpuPercent.percentText)
-                        .monospacedDigit()
-                        .foregroundStyle(row.cpuPercent > 90 ? .red : (row.cpuPercent > 50 ? .orange : .primary))
-                }
-                .width(min: 54, ideal: 64, max: 64)
-                TableColumn("内存", value: \.memoryBytes) { row in
-                    Text(row.memoryBytes.memoryText)
-                        .monospacedDigit()
-                }
-                .width(min: 70, ideal: 78, max: 78)
-            }
-            .scrollIndicators(.hidden)
-            .background(HideTableScrollers())
-            .defaultScrollAnchor(.top)
-            .frame(maxHeight: .infinity)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .alert("强制退出进程", isPresented: Binding(
             get: { confirmTarget != nil },
@@ -1131,7 +1151,7 @@ struct ProcessPanelContent: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("确定要强制退出“\(confirmTarget?.name ?? "")”(PID \(confirmTarget?.pid ?? 0))吗?")
+            Text("确定要强制退出“\(confirmTarget?.displayName ?? "")”(PID \(confirmTarget?.pid ?? 0))吗?")
         }
         .alert("无法退出进程", isPresented: Binding(
             get: { killErrorText != nil },
@@ -1143,9 +1163,65 @@ struct ProcessPanelContent: View {
         }
     }
 
+    private func rankBlock(_ title: String, rows: [ProcInfo],
+                           metric: @escaping (ProcInfo) -> String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(rows) { row in
+                HStack(spacing: 8) {
+                    Text(row.isJava ? "☕ \(row.displayName)" : row.displayName)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    Text(metric(row))
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundStyle(title == "CPU" && row.cpuPercent > 90 ? .red : .primary)
+                }
+                .contentShape(Rectangle())
+                .contextMenu {
+                    Button("强制退出 \(row.displayName)", role: .destructive) {
+                        confirmTarget = row
+                    }
+                }
+            }
+        }
+    }
+
     private func doKill(_ target: ProcInfo) {
         if store.forceQuit(pid: target.pid) { return }
-        killErrorText = "无法结束 PID \(target.pid)(\(target.name))"
+        killErrorText = "无法结束 PID \(target.pid)(\(target.displayName))"
+    }
+}
+
+/// 进程表 / Java 列表出现时才让采样把全表送到主线程。
+struct ProcessListHold: View {
+    let active: Bool
+    @State private var held = false
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            .onAppear { sync(active) }
+            .onDisappear {
+                if held {
+                    held = false
+                    MonitorStore.shared.releaseProcessList()
+                }
+            }
+            .onChange(of: active) { _, now in sync(now) }
+    }
+
+    private func sync(_ now: Bool) {
+        if now && !held {
+            held = true
+            MonitorStore.shared.acquireProcessList()
+        } else if !now && held {
+            held = false
+            MonitorStore.shared.releaseProcessList()
+        }
     }
 }
 
@@ -1302,6 +1378,65 @@ struct GLMPlanContent: View {
     }
 }
 
+// MARK: - 声音律动
+
+
+/// 左下角的律动:没有外框,条从底边往上长。
+struct PulseCornerView: View {
+    var body: some View {
+        PulseSpectrumCanvas()
+            .padding(.horizontal, 2)
+            .padding(.bottom, 1)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// 细竖条站在底边上,只往上长。颜色跟设置走:自选一种,或每根条一个稳定的随机色。
+struct PulseSpectrumCanvas: View {
+    @ObservedObject private var model = PulseModel.shared
+    @ObservedObject private var settings = CardSettings.shared
+
+    var body: some View {
+        let random = settings.pulseColorRandom
+        let seed = settings.pulseColorSeed
+        let fixed = settings.pulseColor
+        Canvas { context, size in
+            let bands = model.bands
+            let count = bands.count
+            let slot = size.width / CGFloat(count)
+            let barWidth = max(2, slot * 0.35)
+            for i in 0..<count {
+                let value = bands[i]
+                guard value > 0 else { continue }
+                let h = size.height * CGFloat(value)
+                guard h >= 1 else { continue }
+                let rect = CGRect(x: CGFloat(i) * slot + (slot - barWidth) / 2,
+                                  y: size.height - h,
+                                  width: barWidth,
+                                  height: h)
+                let tint = random ? PulseBarColor.color(index: i, seed: seed) : fixed
+                context.fill(
+                    Path(roundedRect: rect, cornerRadius: barWidth / 2),
+                    with: .color(tint.opacity(0.45 + 0.55 * value)))
+            }
+        }
+    }
+}
+
+/// 由种子决定的每根条颜色。同一个种子每次算出来一样,不会跟着 30Hz 乱闪。
+enum PulseBarColor {
+    static func color(index: Int, seed: Int) -> Color {
+        var state = UInt64(bitPattern: Int64(seed)) &+ UInt64(index) &* 0x9E3779B97F4A7C15
+        func next() -> Double {
+            state = state &* 6364136223846793005 &+ 1
+            return Double(state >> 33) / Double(1 << 31)
+        }
+        return Color(red: 0.28 + 0.72 * next(),
+                     green: 0.28 + 0.72 * next(),
+                     blue: 0.28 + 0.72 * next())
+    }
+}
+
 /// 面板底部的"标签 — 数值"行列表,行间细分隔线,像一张小表。
 struct StatRows: View {
     let rows: [(String, String)]
@@ -1350,7 +1485,7 @@ func edgeTabShape(for edge: DockEdge, radius r: CGFloat = 11) -> UnevenRoundedRe
         return UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0,
                                       bottomTrailingRadius: r, topTrailingRadius: r,
                                       style: .continuous)
-    case .bottomLeft, .bottomRight:
+    case .bottomRight:
         return UnevenRoundedRectangle(topLeadingRadius: r, bottomLeadingRadius: 0,
                                       bottomTrailingRadius: 0, topTrailingRadius: r,
                                       style: .continuous)
@@ -1366,30 +1501,69 @@ struct EdgeLine: Shape {
     }
 }
 
-/// 42ms 依次弹入/弹出的编舞(取自 noty 的 Staged)。
+/// 右下角横排的出场序号。入场从右往左(靠右的是 0),退场从左往右。
+/// 齿轮在最左,卡片 index 越大越靠右。
+private func stageOrder(index: Int, totalCount: Int, revealed: Bool, edge: DockEdge) -> Int {
+    guard edge == .bottomRight else {
+        return revealed ? index : max(0, totalCount - 1 - index)
+    }
+    let gear = totalCount - 1
+    let fromRight = index == gear ? gear : max(0, gear - 1 - index)
+    return revealed ? fromRight : (gear - fromRight)
+}
+
+/// 依次弹入/弹出。延迟用定时器等,不用 Animation.delay:
+/// delay 会先把卡片画到终点再弹回起点,看起来就是闪一下。
 private struct Staged: ViewModifier {
     let index: Int
     let totalCount: Int
     let revealed: Bool
     let edge: DockEdge
+    @State private var shown = false
+    @State private var ticket = StageTicket()
 
     func body(content: Content) -> some View {
-        let delay = revealed
-            ? Double(index) * 0.042
-            : Double(max(0, totalCount - 1 - index)) * 0.030
-        let hiddenOffset: CGSize
-        switch edge {
-        case .right:  hiddenOffset = CGSize(width: DockGeom.tabWidth + 24, height: 0)
-        case .left:   hiddenOffset = CGSize(width: -(DockGeom.tabWidth + 24), height: 0)
-        case .bottomLeft, .bottomRight: hiddenOffset = CGSize(width: 0, height: DockGeom.tabWidth + 24)
-        }
-        return content
-            .offset(x: revealed ? 0 : hiddenOffset.width,
-                    y: revealed ? 0 : hiddenOffset.height)
-            .opacity(revealed ? 1 : 0)
-            .animation(.spring(response: 0.34, dampingFraction: 0.76)
-                        .delay(delay), value: revealed)
+        let hiddenOffset = Self.hiddenOffset(for: edge)
+        content
+            .offset(x: shown ? 0 : hiddenOffset.width,
+                    y: shown ? 0 : hiddenOffset.height)
+            .compositingGroup()
+            .opacity(shown ? 1 : 0)
+            .onAppear {
+                guard revealed else { return }
+                schedule(true)
+            }
+            .onChange(of: revealed) { _, newValue in
+                schedule(newValue)
+            }
     }
+
+    private static func hiddenOffset(for edge: DockEdge) -> CGSize {
+        switch edge {
+        case .right: return CGSize(width: DockGeom.tabWidth + 24, height: 0)
+        case .left: return CGSize(width: -(DockGeom.tabWidth + 24), height: 0)
+        case .bottomRight: return CGSize(width: 0, height: DockGeom.tabWidth + 24)
+        }
+    }
+
+    private func schedule(_ newValue: Bool) {
+        ticket.value += 1
+        let token = ticket.value
+        let delay = Double(stageOrder(index: index, totalCount: totalCount,
+                                       revealed: newValue, edge: edge))
+            * DockGeom.stageInterval
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard token == ticket.value, shown != newValue else { return }
+            withAnimation(.spring(response: DockGeom.stageSpring, dampingFraction: 1)) {
+                shown = newValue
+            }
+        }
+    }
+}
+
+/// 退场改主意时作废还没开始的定时器。类是为了让延后的闭包读到最新序号。
+private final class StageTicket {
+    var value = 0
 }
 
 private extension View {

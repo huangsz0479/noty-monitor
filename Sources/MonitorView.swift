@@ -105,7 +105,7 @@ struct MonitorView: View {
                 ForEach(MonitorTab.activeTabs) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
-            .frame(width: 430)
+            .frame(maxWidth: .infinity)
             .labelsHidden()
 
             Toggle("仅我的进程", isOn: $onlyMine)
@@ -145,9 +145,14 @@ struct MonitorView: View {
     private var chartSection: some View {
         if tab == .cpu {
             VStack(alignment: .leading, spacing: 4) {
-                Text("系统 CPU 使用率 — 当前 \(store.system.cpuPercent.percentText) · \(store.system.coreCount) 核")
+                Text(cpuHeadline)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                if let peak = store.dailyPeak {
+                    Text(peak.sentence)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 CPUChart(history: store.cpuHistory)
             }
         } else if tab == .network {
@@ -219,6 +224,14 @@ struct MonitorView: View {
         }
     }
 
+    private var cpuHeadline: String {
+        var text = "系统 CPU 使用率 — 当前 \(store.system.cpuPercent.percentText) · \(store.system.coreCount) 核"
+        if let name = store.digest.dominantName {
+            text += " · 最忙 \(name) \(Int(store.digest.dominantCPU.rounded()))%"
+        }
+        return text
+    }
+
     private var javaSummary: String {
         let jvms = store.processes.filter(\.isJava)
         guard !jvms.isEmpty else { return "Java — 没有正在运行的 JVM 进程" }
@@ -231,8 +244,8 @@ struct MonitorView: View {
 
     private var processTable: some View {
         Table(filtered, selection: $selectedPID, sortOrder: $sortOrder) {
-            TableColumn("进程", value: \.name) { row in
-                Text(row.isJava ? "☕ \(row.displayName)" : row.name)
+            TableColumn("进程", value: \.displayName) { row in
+                Text(row.isJava ? "☕ \(row.displayName)" : row.displayName)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .contextMenu {

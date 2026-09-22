@@ -15,11 +15,15 @@ struct ProcInfo: Identifiable {
     let isJava: Bool
     /// JVM 的业务标签:从命令行提取的 -jar 包名或主类名,如 "foo.jar"、"GradleDaemon"。
     let javaLabel: String?
+    /// node / python 的脚本文件名。没有可识别的脚本时为 nil。
+    let scriptLabel: String?
     var id: Int32 { pid }
 
-    /// 列表显示名:Java 进程优先用业务标签,否则全是无区分度的 "java"。
+    /// 列表显示名:运行时进程用业务标签,否则全是无区分度的 "java" / "node"。
     var displayName: String {
-        isJava ? (javaLabel ?? name) : name
+        if isJava { return javaLabel ?? name }
+        if let scriptLabel, !scriptLabel.isEmpty { return scriptLabel }
+        return name
     }
 }
 
@@ -37,7 +41,8 @@ enum ProcFilter {
             .filter { row in
                 if onlyMine && !row.isCurrentUser { return false }
                 guard !q.isEmpty else { return true }
-                return row.name.lowercased().contains(q)
+                return row.displayName.lowercased().contains(q)
+                    || row.name.lowercased().contains(q)
                     || row.user.lowercased().contains(q)
                     || String(row.pid).contains(q)
             }
@@ -52,8 +57,13 @@ final class ProcessSampler {
     private var lastCPUSeconds: [Int32: Double] = [:]
     private var lastDate: Date?
     private static var uidCache: [UInt32: String] = [:]
-    /// JVM 业务标签缓存(参数进程生命周期内不变),只在采样队列上访问。
-    private var javaLabels: [Int32: String] = [:]
+    /// 可执行路径按 pid 缓存(进程活着时不变)。只在采样队列上访问。
+    private var pathCache: [Int32: String] = [:]
+    /// JVM / node / python 的业务标签。空字符串表示命令行已读过、没有可展示的名字。
+    /// 只在采样队列上访问。
+    private var runtimeLabels: [Int32: String] = [:]
+    /// CPU 卡上"当前最忙"的锁定名,避免两个进程来回抢卡面。
+    private var latchedDominant: String?
 
     /// pti_total_user / pti_total_system 是 mach 时基 tick(Apple Silicon 上
     /// 24 MHz,1 tick ≠ 1µs),必须用 mach_timebase_info 换算成秒。
@@ -91,24 +101,8 @@ final class ProcessSampler {
             }
 
             let uid = kp.kp_eproc.e_ucred.cr_uid
-            var path: String?
-            var buffer = [CChar](repeating: 0, count: 4096)
-            if proc_pidpath(pid, &buffer, 4096) > 0 {
-                path = String(cString: buffer)
-            }
-
-            // JVM 识别:可执行路径以 /bin/java 结尾(java、Gradle/Kotlin daemon、
-            // IDE 内置 JBR 全是这个特征)。标签从命令行参数提取,按 pid 缓存。
-            let isJava = path?.hasSuffix("/java") ?? false
-            var javaLabel: String?
-            if isJava {
-                if let cached = javaLabels[pid] {
-                    javaLabel = cached
-                } else if let argv = Self.commandLine(pid: pid), let label = Self.javaLabel(argv) {
-                    javaLabel = label
-                    javaLabels[pid] = label
-                }
-            }
+            let path = self.path(for: pid)
+            let runtime = runtimeLabel(pid: pid, path: path)
 
             result.append(ProcInfo(
                 pid: pid,
@@ -119,16 +113,97 @@ final class ProcessSampler {
                 memoryBytes: info.ptinfo.pti_resident_size,
                 threadCount: Int(info.ptinfo.pti_threadnum),
                 isCurrentUser: uid == myUID,
-                isJava: isJava,
-                javaLabel: javaLabel
+                isJava: runtime.isJava,
+                javaLabel: runtime.javaLabel,
+                scriptLabel: runtime.scriptLabel
             ))
         }
 
         lastCPUSeconds = next
         lastDate = now
-        // 清掉已退出的 JVM 的标签缓存。
-        javaLabels = javaLabels.filter { next[$0.key] != nil }
+        // 清掉已退出进程的缓存。
+        pathCache = pathCache.filter { next[$0.key] != nil }
+        runtimeLabels = runtimeLabels.filter { next[$0.key] != nil }
         return ProcessSample(date: now, processes: result)
+    }
+
+    /// 从一份进程表里抽出卡片要用的摘要。有锁定状态,只在采样队列上调用。
+    func digest(of processes: [ProcInfo]) -> ProcessDigest {
+        var digest = ProcessDigest(count: processes.count)
+        var ranked: [ProcInfo] = []
+        ranked.reserveCapacity(processes.count)
+        for process in processes {
+            if process.isJava {
+                digest.javaCount += 1
+                digest.javaMemoryBytes += process.memoryBytes
+                digest.javaCPU += process.cpuPercent
+            }
+            if ProcessDigest.noiseNames.contains(process.name) { continue }
+            ranked.append(process)
+        }
+        ranked.sort { $0.cpuPercent > $1.cpuPercent }
+
+        let top = ranked.first
+        let second = ranked.dropFirst().first?.cpuPercent ?? 0
+        if let top, top.cpuPercent > 0 {
+            digest.busiestName = top.displayName
+        }
+
+        let chosen: ProcInfo?
+        if let latched = latchedDominant,
+           let current = ranked.first(where: { $0.displayName == latched }),
+           current.cpuPercent >= 50,
+           (top == nil || current.displayName == top?.displayName
+            || current.cpuPercent >= (top?.cpuPercent ?? 0) * 0.75) {
+            chosen = current
+        } else if let top, top.cpuPercent >= 50, top.cpuPercent >= max(second, 0.1) * 1.8 {
+            chosen = top
+        } else {
+            chosen = nil
+        }
+        latchedDominant = chosen?.displayName
+        if let chosen {
+            digest.dominantName = ProcessDigest.cardToken(chosen.displayName)
+            digest.dominantCPU = chosen.cpuPercent
+        }
+        return digest
+    }
+
+    /// 路径进程生命周期内不变。读失败不缓存,下一拍再试。
+    private func path(for pid: Int32) -> String? {
+        if let cached = pathCache[pid] { return cached }
+        var buffer = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(pid, &buffer, 4096) > 0 else { return nil }
+        let value = String(cString: buffer)
+        guard !value.isEmpty else { return nil }
+        pathCache[pid] = value
+        return value
+    }
+
+    /// JVM 看路径末段是不是 java;node / python 再从命令行摘脚本名。
+    /// 命令行读成功后才缓存(包括"没有可展示名字"),读失败下一拍再试。
+    private func runtimeLabel(pid: Int32, path: String?) -> (isJava: Bool, javaLabel: String?, scriptLabel: String?) {
+        let base = path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+        let isJava = base == "java"
+        let isScript = Self.isScriptRuntime(base)
+        guard isJava || isScript else { return (false, nil, nil) }
+
+        let cached = runtimeLabels[pid]
+        if let cached {
+            let label = cached.isEmpty ? nil : cached
+            return isJava ? (true, label, nil) : (false, nil, label)
+        }
+        guard let argv = Self.commandLine(pid: pid) else { return (isJava, nil, nil) }
+        let label = isJava ? Self.javaLabel(argv) : Self.scriptLabel(argv)
+        runtimeLabels[pid] = label ?? ""
+        return isJava ? (true, label, nil) : (false, nil, label)
+    }
+
+    private static func isScriptRuntime(_ base: String) -> Bool {
+        switch base {
+        case "node", "nodejs", "python", "Python": return true
+        default: return base.hasPrefix("python3")
+        }
     }
 
     // MARK: - Helpers
@@ -225,5 +300,17 @@ final class ProcessSampler {
         }
         // 默认包里的裸主类(无点号)。
         return args.first { !$0.hasPrefix("-") }
+    }
+
+    /// node / python:第一个看起来像脚本的参数,取文件名。
+    static func scriptLabel(_ argv: [String]) -> String? {
+        for arg in argv.dropFirst() where !arg.hasPrefix("-") {
+            let base = URL(fileURLWithPath: arg).lastPathComponent
+            if base.hasSuffix(".js") || base.hasSuffix(".mjs") || base.hasSuffix(".cjs")
+                || base.hasSuffix(".ts") || base.hasSuffix(".py") {
+                return base
+            }
+        }
+        return nil
     }
 }

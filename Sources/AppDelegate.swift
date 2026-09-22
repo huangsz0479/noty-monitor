@@ -5,6 +5,8 @@ import ServiceManagement
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var dockManager: EdgeDockManager!
     private var fullWindow: NSWindow?
+    /// 完整窗口开着时才订阅进程全表。
+    private var holdingProcessList = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -36,11 +38,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             w.center()
             fullWindow = w
         }
+        if !holdingProcessList {
+            holdingProcessList = true
+            MonitorStore.shared.acquireProcessList()
+        }
         NSApp.activate(ignoringOtherApps: true)
         fullWindow?.makeKeyAndOrderFront(nil)
     }
 
     func windowWillClose(_ notification: Notification) {
+        if holdingProcessList {
+            holdingProcessList = false
+            MonitorStore.shared.releaseProcessList()
+        }
         // 完整窗口关掉后回到无 Dock 图标的常驻形态。
         DispatchQueue.main.async { NSApp.setActivationPolicy(.accessory) }
     }
@@ -80,7 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
         let alert = NSAlert()
         alert.messageText = "系统监视器 (SysMon)"
-        alert.informativeText = "版本 \(version)\n基于 noty(MIT 许可)改造的贴边系统监视器。\n鼠标划到屏幕右边缘展开指标卡。"
+        alert.informativeText = "版本 \(version)\n基于 noty(MIT 许可)改造的贴边系统监视器。\n鼠标划到屏幕边缘展开指标卡。"
         alert.runModal()
     }
 
