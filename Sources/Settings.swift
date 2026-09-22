@@ -92,6 +92,14 @@ final class CardSettings: ObservableObject {
         }
     }
 
+    /// 左右缘小圆点离可见区底边的距离(点)。下角停靠不用。
+    /// 默认贴着底边留一点缝,拖动后记住;比屏幕矮时由布局再夹取。
+    @Published var dockVerticalOffset: CGFloat {
+        didSet {
+            UserDefaults.standard.set(Double(dockVerticalOffset), forKey: "dockVerticalOffset")
+        }
+    }
+
     /// 智谱开放平台 API Key(bigmodel.cn 控制台),用于查询 GLM 编码套餐
     /// 余量;留空时智谱卡不出现。优先存系统钥匙串。
     @Published var glmApiKey: String {
@@ -137,6 +145,12 @@ final class CardSettings: ObservableObject {
         } else {
             dockEdge = storedEdge.flatMap(DockEdge.init(rawValue:)) ?? .right
         }
+        if let stored = UserDefaults.standard.object(forKey: "dockVerticalOffset") as? Double,
+           stored.isFinite {
+            dockVerticalOffset = CGFloat(stored)
+        } else {
+            dockVerticalOffset = DockGeom.pillBottomMargin
+        }
         glmApiKey = APIKeyStore.load()
     }
 
@@ -171,6 +185,11 @@ struct SettingsView: View {
 
     private var glmKeyMissing: Bool {
         settings.glmApiKey.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private var edgeHint: String {
+        let drag = settings.dockEdge.isBottom ? "" : "按住小圆点或卡片可以上下拖动位置。"
+        return "鼠标划到屏幕\(settings.dockEdge.label)展开卡片,点击卡片查看详情。\(drag)机器忙、电量低或套餐快用完时,对应卡片会自己探出来。至少保留一张卡片。"
     }
 
     private func binding(_ kind: DockPanelKind) -> Binding<Bool> {
@@ -260,7 +279,7 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
 
-            Text("鼠标划到屏幕\(settings.dockEdge.label)展开卡片,点击卡片查看详情。机器忙、电量低或套餐快用完时,对应卡片会自己探出来。至少保留一张卡片。")
+            Text(edgeHint)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -51,6 +51,8 @@ final class EdgeDockModel: ObservableObject {
     /// 扇形正在按入场的相反顺序收回。state 仍停在 .fan,列才不会被提前卸掉。
     @Published var closing = false
     @Published var fanHeight: CGFloat = 0   // 卡片列实测自然高度
+    /// 左右缘小圆点离可见区底边的距离,已按当前屏幕夹取。下角布局不用。
+    @Published var verticalOffset: CGFloat = DockGeom.pillBottomMargin
 
     init(edge: DockEdge) { self.edge = edge }
 }
@@ -95,7 +97,7 @@ enum DockGeom {
     static var fanExitDuration: TimeInterval {
         pillRevealDelay
     }
-    /// pill 停靠在右下角,避开原版 noty 在右边缘中部的默认位置。
+    /// 左右缘小圆点离可见区底边的默认距离。用户拖动后改记在 dockVerticalOffset。
     static let pillBottomMargin: CGFloat = 16
 
     /// 下缘停靠时与右下角的留白,比左右缘更贴角。
@@ -232,6 +234,15 @@ final class EdgeDockController: NSObject {
     /// 探出的瞬间面板会变大,可能正好盖住鼠标而误触发 mouseEntered。
     /// 这一小段时间内不把 peek 升级成整列扇形。
     private var suppressFanPromotionUntil = Date.distantPast
+    /// 按下贴边内容后,直到松手都不因 tracking 误报去展开或收起。
+    private var dragTracking = false
+    private var dragDidMove = false
+    private var dragAnchorX: CGFloat?
+    private var dragAnchorY: CGFloat?
+    private var dragAnchorOffset: CGFloat?
+    private var resizeCursorPushed = false
+    /// 拖完松手那一下不算点击,避免卡片或齿轮跟着被点开。
+    private var ignoreClickUntil = Date.distantPast
 
     weak var manager: EdgeDockManager?
 
@@ -257,6 +268,10 @@ final class EdgeDockController: NSObject {
         self.displayID = displayID
         self.model = EdgeDockModel(edge: CardSettings.shared.dockEdge)
         super.init()
+
+        if let vis = screen?.visibleFrame {
+            model.verticalOffset = clampedVerticalOffset(visibleHeight: vis.height)
+        }
 
         container = EdgeDockContentView()
         container.controller = self
@@ -319,6 +334,7 @@ final class EdgeDockController: NSObject {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor) }
         idleTimer?.invalidate()
+        popResizeCursor()
         panel.orderOut(nil)
     }
 
@@ -330,35 +346,59 @@ final class EdgeDockController: NSObject {
         guard let screen else { return }
         let full = screen.frame
         let vis = screen.visibleFrame
+        let offset = clampedVerticalOffset(visibleHeight: vis.height)
+        if model.verticalOffset != offset {
+            model.verticalOffset = offset
+        }
 
         let frame: NSRect
         switch model.edge {
         case .right:
-            frame = verticalFrame(state, full: full, vis: vis, fromRight: true)
+            frame = verticalFrame(state, full: full, vis: vis, fromRight: true, offset: offset)
         case .left:
-            frame = verticalFrame(state, full: full, vis: vis, fromRight: false)
+            frame = verticalFrame(state, full: full, vis: vis, fromRight: false, offset: offset)
         case .bottomRight:
             frame = bottomFrame(state, full: full, fromRight: true)
         }
         // display:false——不在点击处理里强制同步重绘(那一帧本来就被
         // resize + SwiftUI 重排占满,同步绘制正是点击瞬间掉帧的来源)。
         // 内容下一拍自然重绘,两帧的发布延迟保证 resize 先落地。
-        panel.setFrame(frame, display: false, animate: false)
+        // 拖动时扇形窗口尺寸不变,只改 SwiftUI 里的偏移;相同 frame 不再 setFrame。
+        if framesDiffer(panel.frame, frame) {
+            panel.setFrame(frame, display: false, animate: false)
+        }
     }
 
-    /// 左右两缘:面板是一条贴边全高窄条,只有停靠方向不同。
+    /// 左右缘小圆点离可见区底边的距离。偏好比这块屏高时只夹取显示,不改存储值。
+    private func clampedVerticalOffset(visibleHeight: CGFloat) -> CGFloat {
+        let limit = max(0, visibleHeight - DockGeom.pillHeight)
+        let raw = CardSettings.shared.dockVerticalOffset
+        guard raw.isFinite else { return min(DockGeom.pillBottomMargin, limit) }
+        return min(max(0, raw), limit).rounded()
+    }
+
+    private func framesDiffer(_ a: NSRect, _ b: NSRect) -> Bool {
+        abs(a.origin.x - b.origin.x) > 0.5
+            || abs(a.origin.y - b.origin.y) > 0.5
+            || abs(a.size.width - b.size.width) > 0.5
+            || abs(a.size.height - b.size.height) > 0.5
+    }
+
+    /// 左右两缘:面板是一条贴边窄条,只有停靠方向不同。高度锚在用户拖好的位置。
     private func verticalFrame(_ state: EdgeDockState, full: NSRect, vis: NSRect,
-                               fromRight: Bool) -> NSRect {
+                               fromRight: Bool, offset: CGFloat) -> NSRect {
         switch state {
         case .rest:
             // 静止的面板本身就是贴边检测条:pill 画在边缘,其余部分透明、可穿透。
             let x = fromRight ? full.maxX - DockGeom.pillWidth : full.minX
-            return NSRect(x: x, y: round(vis.minY + DockGeom.pillBottomMargin),
+            return NSRect(x: x, y: round(vis.minY + offset),
                           width: DockGeom.pillWidth, height: DockGeom.pillHeight)
         case .peek:
             // 与扇形同一套原点(y = 可见区底边),pill 的屏幕位置公式才对得上,
-            // 探出和收回时小圆点不挪窝。高度只够一张卡,不铺满整条边缘。
-            return peekFrame(full: full, vis: vis, fromRight: fromRight, vertical: true)
+            // 探出和收回时小圆点不挪窝。圆点靠近底边时高度只够一张卡;
+            // 拖高之后把窗口加高,否则圆点会跳到探出窗口的顶上。
+            return peekFrame(full: full, vis: vis, fromRight: fromRight, vertical: true,
+                             offset: offset)
         case .fan:
             // fan 与 expanded 同尺寸:首次拉出面板时窗口零 resize,状态可以
             // 同步发布(没有 resize/挂载的同拍竞争)。多出来的区域透明且点击穿透。
@@ -406,10 +446,12 @@ final class EdgeDockController: NSObject {
     }
 
     /// 只装下一张探出的卡。垂直时贴可见区底边,下角时贴屏幕真底边,和静止 pill 对齐。
-    private func peekFrame(full: NSRect, vis: NSRect, fromRight: Bool, vertical: Bool) -> NSRect {
+    private func peekFrame(full: NSRect, vis: NSRect, fromRight: Bool, vertical: Bool,
+                           offset: CGFloat = 0) -> NSRect {
         if vertical {
             let w = DockGeom.tabWidth + DockGeom.bleed + 20
-            let h = min(vis.height, 360)
+            let needed = offset + DockGeom.pillHeight + 36
+            let h = min(vis.height, max(360, needed))
             let x = fromRight ? full.maxX - w : full.minX
             return NSRect(x: x, y: vis.minY, width: w, height: h)
         }
@@ -420,6 +462,106 @@ final class EdgeDockController: NSObject {
         let h: CGFloat = 240
         let x = fromRight ? full.maxX - w : full.minX
         return NSRect(x: x, y: full.minY, width: w, height: h)
+    }
+
+    // MARK: 左右缘拖动
+
+    /// 点在左右缘的小圆点或卡片上时才开始拖。空白穿透区和详情面板主体不算。
+    func prepareVerticalDrag(at screenPoint: NSPoint) -> Bool {
+        guard acceptsVerticalDrag(at: screenPoint), let screen else { return false }
+        dragTracking = true
+        dragDidMove = false
+        dragAnchorX = screenPoint.x
+        dragAnchorY = screenPoint.y
+        dragAnchorOffset = clampedVerticalOffset(visibleHeight: screen.visibleFrame.height)
+        exitWork?.cancel()
+        exitWork = nil
+        return true
+    }
+
+    func updateVerticalDrag(to screenPoint: NSPoint) {
+        guard dragTracking, let y0 = dragAnchorY, let x0 = dragAnchorX,
+              let origin = dragAnchorOffset else { return }
+        if !dragDidMove {
+            let dy = screenPoint.y - y0
+            let dx = screenPoint.x - x0
+            guard abs(dy) >= 4, abs(dy) > abs(dx) else { return }
+            dragDidMove = true
+            pushResizeCursor()
+            model.hoveredCard = nil
+        }
+        guard let screen else { return }
+        let limit = max(0, screen.visibleFrame.height - DockGeom.pillHeight)
+        let proposed = min(max(0, origin + screenPoint.y - y0), limit).rounded()
+        guard proposed != CardSettings.shared.dockVerticalOffset else { return }
+        CardSettings.shared.dockVerticalOffset = proposed
+        manager?.layoutAllDocks()
+    }
+
+    func endVerticalDrag() {
+        guard dragTracking else { return }
+        let moved = dragDidMove
+        dragTracking = false
+        dragDidMove = false
+        dragAnchorX = nil
+        dragAnchorY = nil
+        dragAnchorOffset = nil
+        popResizeCursor()
+        noteActivity()
+        if moved {
+            ignoreClickUntil = Date().addingTimeInterval(0.25)
+        }
+        // 按下期间屏蔽了 pointerExited。松手时指针已经离开贴边,就收回去。
+        if model.state == .fan, restingState != .fan,
+           !hotZone.contains(NSEvent.mouseLocation) {
+            setState(quietState)
+        }
+    }
+
+    /// 拖完瞬间的松手。卡片、齿轮、关闭按钮都来问一次。
+    func consumeDragClick() -> Bool {
+        Date() < ignoreClickUntil
+    }
+
+    private func acceptsVerticalDrag(at screenPoint: NSPoint) -> Bool {
+        guard !model.edge.isBottom, let screen else { return false }
+        guard screen.frame.contains(screenPoint) else { return false }
+        guard edgeStrip(full: screen.frame).contains(screenPoint) else { return false }
+        return dockContentHit(at: screenPoint)
+    }
+
+    /// 贴屏幕左右缘的一条窄带,盖住小圆点和卡片,不盖住详情面板主体。
+    private func edgeStrip(full: NSRect) -> NSRect {
+        let width = DockGeom.fanWidth + 16
+        switch model.edge {
+        case .right:
+            return NSRect(x: full.maxX - width, y: full.minY, width: width, height: full.height)
+        case .left:
+            return NSRect(x: full.minX, y: full.minY, width: width, height: full.height)
+        case .bottomRight:
+            return .zero
+        }
+    }
+
+    /// 透明区域的 hitTest 是 nil,和点击穿透同一套判断。
+    private func dockContentHit(at screenPoint: NSPoint) -> Bool {
+        guard panel.frame.contains(screenPoint) else { return false }
+        let windowPoint = panel.convertPoint(fromScreen: screenPoint)
+        guard let superview = container.superview else { return true }
+        let superPoint = superview.convert(windowPoint, from: nil)
+        return container.hitTest(superPoint) != nil
+    }
+
+    private func pushResizeCursor() {
+        guard !resizeCursorPushed else { return }
+        NSCursor.resizeUpDown.push()
+        resizeCursorPushed = true
+    }
+
+    private func popResizeCursor() {
+        guard resizeCursorPushed else { return }
+        NSCursor.pop()
+        resizeCursorPushed = false
     }
 
     // MARK: Transitions
@@ -507,6 +649,10 @@ final class EdgeDockController: NSObject {
         lastPointer = NSEvent.mouseLocation
         idleTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
             guard let self else { return }
+            if self.dragTracking {
+                self.noteActivity()
+                return
+            }
             let now = NSEvent.mouseLocation
             if self.model.state == .fan, !self.hotZone.contains(now) {
                 self.collapse(); return
@@ -543,6 +689,7 @@ final class EdgeDockController: NSObject {
     }
 
     func pointerEntered() {
+        if dragTracking { return }
         noteActivity()
         exitWork?.cancel(); exitWork = nil
         // 退场时面板还是全尺寸,布局一变就会误报「鼠标进来」。
@@ -573,6 +720,7 @@ final class EdgeDockController: NSObject {
     }
 
     func pointerExited() {
+        if dragTracking { return }
         // 永久展开模式下指针离开不收起;拉出的详情保持打开,直到 Esc/外部点击。
         guard model.state == .fan, restingState != .fan else { return }
         // resize 时 tracking area 会误报,延迟确认指针确实离开了。
@@ -588,6 +736,7 @@ final class EdgeDockController: NSObject {
     }
 
     func toggle(_ kind: DockPanelKind) {
+        if consumeDragClick() { return }
         noteActivity()
         if model.state.expandedKind == kind { collapse() } else { expand(kind) }
     }
@@ -689,6 +838,8 @@ final class EdgeDockManager {
     /// 律动不占卡片,每块屏的左下角一块独立频谱。
     private var pulseCorners: [CGDirectDisplayID: PulseCornerController] = [:]
     private var bag = Set<AnyCancellable>()
+    private var dragMonitors: [Any] = []
+    private var draggingDisplayID: CGDirectDisplayID?
 
     init() {
         CardSettings.shared.$alwaysShown
@@ -716,6 +867,7 @@ final class EdgeDockManager {
             }
             .store(in: &bag)
         rebuild()
+        installDragMonitors()
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main) { [weak self] _ in self?.rebuild() }
@@ -745,6 +897,57 @@ final class EdgeDockManager {
         }
         docks.values.forEach { $0.layout() }
         pulseCorners.values.forEach { $0.layout() }
+    }
+
+    func layoutAllDocks() {
+        docks.values.forEach { $0.layout() }
+    }
+
+    /// 左右缘按下后上下拖。本应用收到的走 local,点在别的应用上时走 global,两边不会同时来。
+    private func installDragMonitors() {
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+        if let monitor = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            self?.routeVerticalDrag(event)
+            return event
+        }) {
+            dragMonitors.append(monitor)
+        }
+        if let monitor = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            self?.routeVerticalDrag(event)
+        }) {
+            dragMonitors.append(monitor)
+        }
+    }
+
+    private func screenPoint(from event: NSEvent) -> NSPoint {
+        guard let window = event.window else { return NSEvent.mouseLocation }
+        return window.convertPoint(toScreen: event.locationInWindow)
+    }
+
+    private func routeVerticalDrag(_ event: NSEvent) {
+        let point = screenPoint(from: event)
+        switch event.type {
+        case .leftMouseDown:
+            if let draggingDisplayID {
+                docks[draggingDisplayID]?.endVerticalDrag()
+            }
+            draggingDisplayID = docks.first { _, dock in
+                dock.prepareVerticalDrag(at: point)
+            }?.key
+        case .leftMouseDragged:
+            guard let draggingDisplayID, let dock = docks[draggingDisplayID] else { return }
+            dock.updateVerticalDrag(to: point)
+        case .leftMouseUp:
+            let id = draggingDisplayID
+            draggingDisplayID = nil
+            if let id { docks[id]?.endVerticalDrag() }
+        default:
+            break
+        }
+    }
+
+    deinit {
+        dragMonitors.forEach { NSEvent.removeMonitor($0) }
     }
 
     /// 同一时间只展开一个——指针进入哪个屏就收起其他的。

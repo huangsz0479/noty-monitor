@@ -82,7 +82,10 @@ struct EdgeDockRootView: View {
                 // 最后声明,盖住卡片列,贴屏幕边缘。
                 if let kind = dock.state.expandedKind {
                     MetricPanelView(kind: kind, store: store, edge: edge,
-                                    onClose: { controller.collapse() })
+                                    onClose: {
+                                        if controller.consumeDragClick() { return }
+                                        controller.collapse()
+                                    })
                         .padding(panelPadding(kind: kind, panelHeight: h, panelWidth: w))
                         .transition(.modifier(active: PanelPull(hidden: true, edge: edge),
                                                identity: PanelPull(hidden: false, edge: edge)))
@@ -142,10 +145,10 @@ struct EdgeDockRootView: View {
         }
     }
 
-    /// 面板全高时 pill 仍落在右下角的屏幕位置上:面板在它周围长大、
-    /// 缩回时,pill 一动不动(顶部偏移 = 面板高 - 底边距 - pill 高)。
+    /// 面板全高、底边贴着可见区底边时,pill 仍落在拖好的高度上:
+    /// 顶部偏移 = 面板高 - 底边距 - pill 高。静止窗口本身就是 pill,这个值是 0。
     private func pillTop(panelHeight h: CGFloat) -> CGFloat {
-        max(0, h - DockGeom.pillBottomMargin - DockGeom.pillHeight)
+        max(0, h - dock.verticalOffset - DockGeom.pillHeight)
     }
 
     /// 锚点列高:与 hover 无关。"悬停显示数值"只伸缩被悬停的那张卡本身,
@@ -171,7 +174,7 @@ struct EdgeDockRootView: View {
 
     /// 扇形以 pill 中心为轴向上展开,但不跑出屏幕。
     private func fanTop(panelHeight h: CGFloat) -> CGFloat {
-        let pillCenter = h - DockGeom.pillBottomMargin - DockGeom.pillHeight / 2
+        let pillCenter = h - dock.verticalOffset - DockGeom.pillHeight / 2
         return min(max(12, pillCenter - anchorStack / 2), max(12, h - anchorStack - 12))
     }
 
@@ -334,7 +337,7 @@ struct MetricFanColumn: View {
                     .padding(.top, item.y)
             }
 
-            CogButton { SettingsWindow.shared.show() }
+            CogButton { openSettings() }
                 .padding(.top, totalHeight + 4)
                 .staged(index: shownCards.count,
                         total: shownCards.count + 1,
@@ -363,7 +366,7 @@ struct MetricFanColumn: View {
                                  * (DockGeom.tabWidth - DockGeom.tabLap))
             }
 
-            CogButton { SettingsWindow.shared.show() }
+            CogButton { openSettings() }
                 .padding(fromRight ? .trailing : .leading, rowWidth + 4)
                 .staged(index: shownCards.count,
                         total: shownCards.count + 1,
@@ -377,6 +380,11 @@ struct MetricFanColumn: View {
                 .opacity(isRevealed ? 1 : 0)
                 .allowsHitTesting(false)
         }
+    }
+
+    private func openSettings() {
+        if controller.consumeDragClick() { return }
+        SettingsWindow.shared.show()
     }
 
     /// onHover 必须贴在卡片本体上(定位 padding 之前):padding 的透明
