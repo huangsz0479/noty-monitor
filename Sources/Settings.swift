@@ -111,12 +111,22 @@ final class CardSettings: ObservableObject {
 
     private init() {
         let storedCards = UserDefaults.standard.stringArray(forKey: "enabledCards")
+        let noteIntroduced = UserDefaults.standard.object(forKey: "noteCardIntroduced") != nil
+        var initial: Set<DockPanelKind>
         if let raw = storedCards {
             let stored = Set(raw.compactMap(DockPanelKind.init(rawValue:)))
-            enabled = stored.isEmpty ? Set(DockPanelKind.allCases) : stored
+            initial = stored.isEmpty ? Set(DockPanelKind.allCases) : stored
         } else {
-            enabled = Set(DockPanelKind.allCases)
+            initial = Set(DockPanelKind.allCases)
         }
+        // 旧偏好里没有「便签」。第一次见到这张卡时默认打开,之后尊重用户的勾选。
+        // init 里给 enabled 赋值不会走 didSet,所以这里自己写回。
+        if !noteIntroduced {
+            initial.insert(.note)
+            UserDefaults.standard.set(true, forKey: "noteCardIntroduced")
+            UserDefaults.standard.set(initial.map(\.rawValue), forKey: "enabledCards")
+        }
+        enabled = initial
         // 以前律动是一张卡:勾过就接着开,没存过卡片列表时默认开。
         let pulseOn = UserDefaults.standard.object(forKey: "pulseEnabled") == nil
             ? (storedCards?.contains("律动") ?? true)

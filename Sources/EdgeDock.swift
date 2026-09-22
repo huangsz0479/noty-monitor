@@ -15,6 +15,7 @@ enum DockPanelKind: String, CaseIterable, Identifiable {
     case glm = "智谱"
     case java = "Java"
     case processes = "进程"
+    case note = "便签"
     var id: String { rawValue }
 }
 
@@ -117,7 +118,7 @@ enum DockGeom {
     /// Java 的 JVM 列表要宽纸(标签是完整类名);贴边进程面板只放前几名,窄一档。
     static func panelWidth(_ kind: DockPanelKind) -> CGFloat {
         switch kind {
-        case .processes: return 360
+        case .processes, .note: return 360
         case .java: return 560
         default: return panelContentWidth
         }
@@ -137,6 +138,7 @@ enum DockGeom {
         case .glm: return 330
         case .java: return 420
         case .processes: return 440
+        case .note: return 520
         }
     }
 }

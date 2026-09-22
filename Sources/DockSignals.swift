@@ -59,6 +59,8 @@ struct DashLevels: Equatable {
     var glm = 0.0
     var java = 0.0
     var processes = 0.75
+    /// 便签不是用量,彩条保持常亮。
+    var note = 0.8
 
     func level(for kind: DockPanelKind) -> Double {
         switch kind {
@@ -71,6 +73,7 @@ struct DashLevels: Equatable {
         case .glm: return glm
         case .java: return java
         case .processes: return processes
+        case .note: return note
         }
     }
 

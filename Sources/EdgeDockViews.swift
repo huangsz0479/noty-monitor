@@ -29,6 +29,7 @@ extension DockPanelKind {
         case .glm:       return MetricColor(paper: hex(0xF7C6CE), dash: hex(0xD8495B), ink: hex(0x3B161C))  // Rose
         case .java:      return MetricColor(paper: hex(0xCDB492), dash: hex(0x7B4B23), ink: hex(0x2A1A0C))  // Mocha
         case .processes: return MetricColor(paper: hex(0xD9C7FA), dash: hex(0x7C4DEE), ink: hex(0x2A1B44))  // Lilac
+        case .note:      return MetricColor(paper: hex(0xFFE7A3), dash: hex(0xD4920A), ink: hex(0x3A2806))  // Sticky
         }
     }
 }
@@ -40,6 +41,7 @@ struct EdgeDockRootView: View {
     unowned let controller: EdgeDockController
     @ObservedObject var store = MonitorStore.shared
     @ObservedObject var settings = CardSettings.shared
+    @ObservedObject var notes = NoteStore.shared
 
     private var edge: DockEdge { dock.edge }
     /// 卡片收回途中先别亮;等到最后一张基本到位再亮。展开时必须灭掉。
@@ -161,8 +163,9 @@ struct EdgeDockRootView: View {
     }
 
     private var anchorStack: CGFloat {
+        let noteToken = notes.cardToken
         let values = Dictionary(uniqueKeysWithValues: layoutCards.map {
-            ($0, CardMetrics.value(for: $0, store: store))
+            ($0, $0 == .note ? noteToken : CardMetrics.value(for: $0, store: store))
         })
         // 探出的卡数值常显,高度按带数值算;其余时候仍按纯标题,避免悬停把整列顶走。
         let titleOnly = CardMetrics.displayValues(
@@ -255,6 +258,7 @@ struct MetricFanColumn: View {
     unowned let controller: EdgeDockController
     @ObservedObject var store: MonitorStore
     @ObservedObject var settings = CardSettings.shared
+    @ObservedObject var notes = NoteStore.shared
 
     @State private var appeared = false
 
@@ -267,8 +271,9 @@ struct MetricFanColumn: View {
     }
 
     private var valuesById: [DockPanelKind: String] {
-        Dictionary(uniqueKeysWithValues: shownCards.map {
-            ($0, CardMetrics.value(for: $0, store: store))
+        let noteToken = notes.cardToken
+        return Dictionary(uniqueKeysWithValues: shownCards.map {
+            ($0, $0 == .note ? noteToken : CardMetrics.value(for: $0, store: store))
         })
     }
 
@@ -517,6 +522,7 @@ enum CardMetrics {
             guard store.digest.javaCount > 0 else { return "—" }
             return store.digest.javaMemoryBytes.memoryText
         case .processes: return String(store.digest.count)
+        case .note: return NoteStore.shared.cardToken
         }
     }
 }
@@ -697,6 +703,7 @@ struct CogButton: View {
 struct MetricPanelView: View {
     let kind: DockPanelKind
     @ObservedObject var store: MonitorStore
+    @ObservedObject private var notes = NoteStore.shared
     var edge: DockEdge = .right
     let onClose: () -> Void
 
@@ -778,6 +785,9 @@ struct MetricPanelView: View {
                 JavaPanelContent(store: store)
             case .processes:
                 ProcessPanelContent(store: store)
+            case .note:
+                NotePanelContent(ink: kind.palette.ink)
+                    .layoutPriority(1)
             }
             Spacer(minLength: 0)
         }
@@ -883,6 +893,7 @@ struct MetricPanelView: View {
         case .glm: return "sparkles"
         case .java: return "cup.and.saucer"
         case .processes: return "list.bullet.rectangle"
+        case .note: return "note.text"
         }
     }
 
@@ -908,6 +919,7 @@ struct MetricPanelView: View {
         case .java:
             return store.digest.javaCount > 0 ? "\(store.digest.javaCount) 个" : "—"
         case .processes: return "\(store.digest.count)"
+        case .note: return notes.cardToken
         }
     }
 
@@ -1106,6 +1118,242 @@ struct JavaPanelContent: View {
     private func doKill(_ target: ProcInfo) {
         if store.forceQuit(pid: target.pid) { return }
         killErrorText = "无法结束 PID \(target.pid)(\(target.displayName))"
+    }
+}
+
+// MARK: - 便签面板
+
+/// 贴边便签:一次一页,直接在正文里按 Markdown 排版。卡面只报页数。
+struct NotePanelContent: View {
+    @ObservedObject private var notes = NoteStore.shared
+    @State private var page = 0
+    @State private var draft = ""
+    /// 刚滑出来、还没写过字的那一页。往回翻时如果仍是空的,就删掉。
+    @State private var freshPageID: UUID?
+    let ink: Color
+
+    private var count: Int { notes.notes.count }
+
+    private var index: Int {
+        guard count > 0 else { return 0 }
+        return min(max(0, page), count - 1)
+    }
+
+    private var current: StickyNote? {
+        guard count > 0 else { return nil }
+        return notes.notes[index]
+    }
+
+    private var draftIsBlank: Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            toolbar
+            pageBody
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .overlay {
+            NotePageSwipe(allowsNext: canTurn(1), allowsPrevious: canTurn(-1), onCommit: turn)
+                .allowsHitTesting(false)
+        }
+        .onAppear {
+            if notes.notes.isEmpty { appendPage() } else { adoptCurrentText() }
+        }
+        .onChange(of: count) { _, newCount in
+            if newCount == 0 {
+                appendPage()
+            } else if page >= newCount {
+                page = newCount - 1
+                adoptCurrentText()
+            }
+        }
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 2) {
+            iconButton("chevron.left", help: "上一页", enabled: index > 0) { turn(-1) }
+            Text("\(index + 1) / \(count)")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(ink.opacity(0.7))
+                .frame(minWidth: 56)
+            iconButton("chevron.right", help: "下一页", enabled: index + 1 < count) { turn(1) }
+            Spacer(minLength: 4)
+            iconButton("trash", help: "删除这一页", enabled: count > 1, action: deletePage)
+        }
+    }
+
+    private var pageBody: some View {
+        ZStack(alignment: .topLeading) {
+            NoteMarkdownEditor(text: $draft, ink: ink,
+                               allowsNext: canTurn(1), allowsPrevious: canTurn(-1),
+                               onCommit: turn)
+            if draft.isEmpty {
+                Text("用 Markdown 写这一页")
+                    .font(.system(size: 13))
+                    .foregroundStyle(ink.opacity(0.35))
+                    .padding(.top, 8)
+                    .padding(.leading, 8)
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.white.opacity(0.45))
+        )
+        .onChange(of: draft) { _, newValue in
+            guard let id = current?.id else { return }
+            notes.update(id, text: newValue)
+        }
+    }
+
+    private func canTurn(_ direction: Int) -> Bool {
+        if direction < 0 { return index > 0 }
+        if freshPageID == current?.id, draftIsBlank { return false }
+        return count > 0
+    }
+
+    private func iconButton(_ system: String, help: String, enabled: Bool,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 22, height: 22)
+                .foregroundStyle(ink.opacity(enabled ? 0.75 : 0.25))
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .help(help)
+    }
+
+    private func turn(_ delta: Int) {
+        guard count > 0 else { return }
+        saveCurrent()
+        if delta < 0, index > 0, current?.id == freshPageID, draftIsBlank {
+            let target = index - 1
+            let id = notes.notes[index].id
+            freshPageID = nil
+            notes.remove(id)
+            page = min(target, max(0, notes.notes.count - 1))
+            adoptCurrentText()
+            return
+        }
+        if delta < 0, current?.id == freshPageID {
+            freshPageID = nil
+        }
+        let next = index + delta
+        if delta > 0, next >= count {
+            // 这一页还是刚开的空白,不再往下叠空页。
+            if freshPageID == current?.id, draftIsBlank { return }
+            appendPage()
+            return
+        }
+        guard next >= 0, next < count else { return }
+        page = next
+        adoptCurrentText()
+    }
+
+    private func appendPage() {
+        let id = notes.addPage()
+        freshPageID = id
+        if let found = notes.notes.firstIndex(where: { $0.id == id }) {
+            page = found
+        }
+        draft = ""
+    }
+
+    private func deletePage() {
+        guard let id = current?.id else { return }
+        if freshPageID == id { freshPageID = nil }
+        notes.remove(id)
+        if notes.notes.isEmpty {
+            appendPage()
+            return
+        }
+        if page >= notes.notes.count { page = notes.notes.count - 1 }
+        adoptCurrentText()
+    }
+
+    private func saveCurrent() {
+        guard let id = current?.id else { return }
+        notes.update(id, text: draft)
+    }
+
+    private func adoptCurrentText() {
+        draft = current?.text ?? ""
+    }
+}
+
+/// 触控板或鼠标左右滑过便签页时翻页。竖向滚动原样交给正文,不拦截点击。
+struct NotePageSwipe: NSViewRepresentable {
+    var allowsNext: Bool
+    var allowsPrevious: Bool
+    var onCommit: (Int) -> Void
+
+    func makeNSView(context: Context) -> NoteSwipeMonitor {
+        let view = NoteSwipeMonitor()
+        view.tracker.onCommit = onCommit
+        view.tracker.allowsNext = allowsNext
+        view.tracker.allowsPrevious = allowsPrevious
+        return view
+    }
+
+    func updateNSView(_ view: NoteSwipeMonitor, context: Context) {
+        view.tracker.onCommit = onCommit
+        view.tracker.allowsNext = allowsNext
+        view.tracker.allowsPrevious = allowsPrevious
+    }
+
+    static func dismantleNSView(_ view: NoteSwipeMonitor, coordinator: ()) {
+        view.teardown()
+    }
+}
+
+final class NoteSwipeMonitor: NSView {
+    let tracker = NoteSwipeTracker()
+    private var monitor: Any?
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { teardown() } else { install() }
+    }
+
+    func teardown() {
+        guard let monitor else { return }
+        NSEvent.removeMonitor(monitor)
+        self.monitor = nil
+    }
+
+    private func install() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            self?.handle(event) ?? event
+        }
+    }
+
+    private func handle(_ event: NSEvent) -> NSEvent? {
+        guard let window, event.window === window else { return event }
+        // 正文自己的滚动视图认左右滑。这里再吃一次会把事件拦掉,翻页就到不了编辑器。
+        if hitsNoteText(event) { return event }
+        guard bounds.width > 1, bounds.height > 1 else { return event }
+        let point = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(point) else { return event }
+        return tracker.consume(event) ? nil : event
+    }
+
+    private func hitsNoteText(_ event: NSEvent) -> Bool {
+        guard let window, event.window === window else { return false }
+        var view = window.contentView?.hitTest(event.locationInWindow)
+        while let current = view {
+            if current is NoteScrollView || current is NoteTextView { return true }
+            view = current.superview
+        }
+        return false
     }
 }
 
