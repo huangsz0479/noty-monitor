@@ -11,7 +11,9 @@
 形态：平时只有屏幕边缘一个 14pt 小圆点（无 Dock 图标的 accessory App，
 停靠位置可选左缘/右缘/左下角/右下角，UserDefaults key `dockEdge`，默认
 右缘；顶缘让给菜单栏；下角贴屏幕真底边、盖在 Dock 区域上），hover 展开
-6 张指标卡，点击弹出详情面板；另有右键菜单打开的完整窗口。每块显示器
+6 张系统指标卡（另有 I/O 负载卡、Java JVM 卡、配了智谱 API Key 后的
+套餐余量卡，都在设置里开关），点击弹出
+详情面板；另有右键菜单打开的完整窗口。每块显示器
 一个 dock。左右缘为竖排卡片列（互为镜像），两个下角为横排卡片（卡片
 直立站在屏幕底边、顺序与竖排镜像、齿轮在远离角落的一端），四种位置
 共用 `CardMetrics` 实测布局，只是定位轴向与锚点不同。
@@ -44,22 +46,34 @@
   - `SystemMetrics.swift` — `SystemSnapshot` + `SystemSampler`
     （sysctl 页面统计 / `host_statistics64` CPU tick / `getloadavg`）。
   - `ProcessSampler.swift` — libproc 枚举进程，算相邻两次采样的 CPU%。
+    附带 JVM 识别：`proc_pidpath` 以 `/bin/java` 结尾判 Java，`KERN_PROCARGS2`
+    读完整命令行提取业务标签（`-jar` 包名或主类末段），存进
+    `ProcInfo.isJava` / `javaLabel` / `displayName`。
   - `NetworkSampler.swift` — sysctl `NET_RT_IFLIST2` 每网卡字节计数求差。
+  - `DiskIOSampler.swift` — IOKit 注册表 `IOBlockStorageDriver` 的 Statistics
+    （与 iostat 同源）累计字节/操作数求差,得读写速率与 IOPS。
   - `DiskAndIP.swift` — `DiskReader`（URL resourceValues 卷容量）、
     `LocalIPReader`（getifaddrs）、`BatteryReader`（IOPowerSources）。
+  - `GLMPlanUsage.swift` — 智谱 GLM 编码套餐余量。调未写进正式文档的
+    `GET open.bigmodel.cn/api/monitor/usage/quota/limit`（Authorization 头
+    原样放 API Key、不带 Bearer，与智谱官方 zai-coding-plugins 的
+    glm-plan-usage 插件同款），返回每 5 小时 / 本周 / 本月工具三个窗口的
+    used/remaining 百分比与重置时间。
 - **状态层** `MonitorStore.swift` — 单例 ObservableObject。DispatchSourceTimer
   在串行后台队列采样，回主队列写 `@Published`；历史曲线各存 150 点
   （`historyLimit`）。刷新间隔 1/2/5s（持久化到 UserDefaults key
   `refreshInterval`），`sampleNow()` 给 ⌘R；电池约 10s、卷/IP 约 30s
   降频重读，且低频数据不变时不重写 `@Published`（避免无谓重绘）。
+  智谱套餐走独立 60s 轮询（自己的队列 + URLSession 异步，不阻塞采样队列），
+  API Key 变化时防抖后立即重查，`GLMPlanStatus` 相等判断不含 fetchedAt。
 - **贴边 dock**：`EdgeDock.swift`（每屏一个 manager + rest/fan/panel 状态机）、
   `EdgeDockViews.swift`（SwiftUI 指标卡，沿用 noty 纸色调色板，每卡专属色）。
-- **完整窗口** `MonitorView.swift` — SwiftUI Charts 曲线 + 六个标签页 +
-  进程表（排序/搜索/SIGKILL 强杀）。
-- `Settings.swift` — `CardSettings`（卡片可见性、常驻展开、悬停显示数值，
-  UserDefaults 持久化，key：`enabledCards` / `deckAlwaysShown` /
-  `cardValuesOnHover`；电池有无以静态 `hasBattery` 只探测一次，`cards`
-  会被 SwiftUI 每次渲染调用）。悬停显示数值开启时，卡片只显示名称、
+- **完整窗口** `MonitorView.swift` — SwiftUI Charts 曲线 + 标签页（跟随
+  贴边卡片）+ 进程表（排序/搜索/SIGKILL 强杀）。
+- `Settings.swift` — `CardSettings`（卡片可见性、常驻展开、悬停显示数值、
+  智谱 API Key，UserDefaults 持久化，key：`enabledCards` / `deckAlwaysShown` /
+  `cardValuesOnHover` / `glmApiKey`；电池有无以静态 `hasBattery` 只探测一次，
+  `cards` 会被 SwiftUI 每次渲染调用）。悬停显示数值开启时，卡片只显示名称、
   悬停哪张哪张拉高亮出数值（`CardMetrics.displayValues` 过滤），
   关闭则数值常显。
 
@@ -69,9 +83,10 @@
 - CPU% 口径与活动监视器一致：100% = 单核满载，多核可超 100%（进程与
   系统两级都是相邻采样差值）。
 - 只用系统公开接口（sysctl / libproc / host_statistics / IOKit / SMAppService），
-  不要引入第三方依赖或私有 API。
-- 采样有差分状态（NetworkSampler、ProcessSampler 的 last* 字段），只能在
-  MonitorStore 的串行队列上调；`@Published` 一律主线程写。
+  不要引入第三方依赖或私有 API。唯一的网络数据源是智谱套餐余量接口
+  （公开 HTTP + 用户自配 API Key）。
+- 采样有差分状态（NetworkSampler、ProcessSampler、DiskIOSampler 的 last*
+  字段），只能在 MonitorStore 的串行队列上调；`@Published` 一律主线程写。
 - 台式机无电池时电池卡/电池页自动隐藏（`EdgeDockCards.cards` 决定），
   完整窗口标签页跟随它。
 

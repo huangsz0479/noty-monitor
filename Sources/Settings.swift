@@ -57,6 +57,14 @@ final class CardSettings: ObservableObject {
         }
     }
 
+    /// 智谱开放平台 API Key(bigmodel.cn 控制台),用于查询 GLM 编码套餐
+    /// 余量;留空时智谱卡不出现。明文存本地 UserDefaults。
+    @Published var glmApiKey: String {
+        didSet {
+            UserDefaults.standard.set(glmApiKey, forKey: "glmApiKey")
+        }
+    }
+
     private init() {
         if let raw = UserDefaults.standard.stringArray(forKey: "enabledCards") {
             let stored = Set(raw.compactMap(DockPanelKind.init(rawValue:)))
@@ -71,13 +79,16 @@ final class CardSettings: ObservableObject {
         dockEdge = storedEdge == "bottom"
             ? .bottomRight
             : (storedEdge.flatMap(DockEdge.init(rawValue:)) ?? .right)
+        glmApiKey = UserDefaults.standard.string(forKey: "glmApiKey") ?? ""
     }
 
-    /// 按固定顺序返回启用的卡片;没有电池硬件时电池卡永远不出现。
+    /// 按固定顺序返回启用的卡片;没有电池硬件时电池卡永远不出现,
+    /// 没配 API Key 时智谱卡永远不出现。
     var cards: [DockPanelKind] {
         DockPanelKind.allCases
             .filter { enabled.contains($0) }
             .filter { $0 != .battery || Self.hasBattery }
+            .filter { $0 != .glm || !glmApiKey.trimmingCharacters(in: .whitespaces).isEmpty }
     }
 }
 
@@ -90,6 +101,10 @@ enum EdgeDockCards {
 struct SettingsView: View {
     @ObservedObject var settings = CardSettings.shared
     private let hasBattery = CardSettings.hasBattery
+
+    private var glmKeyMissing: Bool {
+        settings.glmApiKey.trimmingCharacters(in: .whitespaces).isEmpty
+    }
 
     private func binding(_ kind: DockPanelKind) -> Binding<Bool> {
         Binding(
@@ -119,10 +134,14 @@ struct SettingsView: View {
                                 Text("(未检测到电池)")
                                     .foregroundStyle(.secondary)
                             }
+                            if kind == .glm && glmKeyMissing {
+                                Text("(未设置 API Key)")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                     .toggleStyle(.checkbox)
-                    .disabled(kind == .battery && !hasBattery)
+                    .disabled((kind == .battery && !hasBattery) || (kind == .glm && glmKeyMissing))
                 }
             }
 
@@ -164,6 +183,19 @@ struct SettingsView: View {
             .labelsHidden()
 
             Text("小圆点与卡片停靠在哪条屏幕边缘,切换后立即生效。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            Text("智谱 GLM 套餐用量")
+                .font(.system(size: 13, weight: .semibold))
+
+            SecureField("API Key", text: $settings.glmApiKey, prompt: Text("粘贴 bigmodel.cn 的 API Key"))
+                .textFieldStyle(.roundedBorder)
+
+            Text("在 bigmodel.cn 控制台「API Keys」页创建后粘贴到这里(明文保存在本机偏好设置)。设置后卡片与详情面板会显示编码套餐的每 5 小时 / 本周 / 本月额度余量;留空则不显示智谱卡。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

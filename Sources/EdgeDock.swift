@@ -10,7 +10,10 @@ enum DockPanelKind: String, CaseIterable, Identifiable {
     case memory = "内存"
     case network = "网络"
     case disk = "磁盘"
+    case io = "I/O"
     case battery = "电池"
+    case glm = "智谱"
+    case java = "Java"
     case processes = "进程"
     var id: String { rawValue }
 }
@@ -85,9 +88,17 @@ enum DockGeom {
     static let expandedWidth: CGFloat = 332
     static let panelContentWidth: CGFloat = 264
 
-    /// 进程表三列需要宽纸,其余面板维持窄条。
+    /// 进程表三列需要宽纸,Java 的 JVM 列表更宽(标签是完整类名);其余面板维持窄条。
     static func panelWidth(_ kind: DockPanelKind) -> CGFloat {
-        kind == .processes ? 440 : panelContentWidth
+        switch kind {
+        case .processes: return 480
+        case .java: return 560
+        default: return panelContentWidth
+        }
+    }
+    /// 展开窗口恒取最宽面板的尺寸(换面板不 resize)。
+    static var maxPanelWidth: CGFloat {
+        DockPanelKind.allCases.map { panelWidth($0) }.max() ?? panelContentWidth
     }
     static func panelHeight(_ kind: DockPanelKind) -> CGFloat {
         switch kind {
@@ -95,7 +106,10 @@ enum DockGeom {
         case .memory: return 366
         case .network: return 398
         case .disk: return 300
+        case .io: return 360
         case .battery: return 220
+        case .glm: return 330
+        case .java: return 420
         case .processes: return 560
         }
     }
@@ -268,7 +282,10 @@ final class EdgeDockController: NSObject {
         case .bottomLeft:
             frame = bottomFrame(state, full: full, fromRight: false)
         }
-        panel.setFrame(frame, display: true, animate: false)
+        // display:false——不在点击处理里强制同步重绘(那一帧本来就被
+        // resize + SwiftUI 重排占满,同步绘制正是点击瞬间掉帧的来源)。
+        // 内容下一拍自然重绘,两帧的发布延迟保证 resize 先落地。
+        panel.setFrame(frame, display: false, animate: false)
     }
 
     /// 左右两缘:面板是一条贴边全高窄条,只有停靠方向不同。
@@ -281,17 +298,22 @@ final class EdgeDockController: NSObject {
             return NSRect(x: x, y: round(vis.minY + DockGeom.pillBottomMargin),
                           width: DockGeom.pillWidth, height: DockGeom.pillHeight)
         case .fan:
-            let w = DockGeom.expandedWidth
+            // fan 与 expanded 同尺寸:首次拉出面板时窗口零 resize,状态可以
+            // 同步发布(没有 resize/挂载的同拍竞争)。多出来的区域透明且点击穿透。
+            let w = DockGeom.tabWidth + DockGeom.maxPanelWidth
             return NSRect(x: fromRight ? full.maxX - w : full.minX,
                           y: vis.minY, width: w, height: vis.height)
-        case .expanded(let kind):
-            let w = DockGeom.tabWidth + DockGeom.panelWidth(kind)
+        case .expanded:
+            // 展开窗口恒取最大面板(进程)的尺寸:换面板时窗口完全不动,
+            // 旧面板不会被瞬间变大的窗口"拽"到新位置再开始动画(两步运动
+            // 就是切换时的抖动)。恒定窗口多出来的区域是透明的,点击穿透。
+            let w = DockGeom.tabWidth + DockGeom.maxPanelWidth
             return NSRect(x: fromRight ? full.maxX - w : full.minX,
                           y: vis.minY, width: w, height: vis.height)
         }
     }
 
-    /// 下角:pill/卡片横躺成一排,面板锚在对应的下角向对侧、向上生长。
+    /// 下缘:pill/卡片横躺成一排,面板锚在对应的下角向对侧、向上生长。
     /// 贴屏幕真正的底边(而不是 visibleFrame 底边)——盖在 Dock 区域上。
     private func bottomFrame(_ state: EdgeDockState, full: NSRect, fromRight: Bool) -> NSRect {
         switch state {
@@ -304,12 +326,15 @@ final class EdgeDockController: NSObject {
             let x = fromRight ? full.maxX - w : full.minX
             return NSRect(x: x, y: full.minY, width: w, height: h)
         case .fan:
-            let side = DockGeom.expandedWidth
-            let x = fromRight ? full.maxX - side : full.minX
-            return NSRect(x: x, y: full.minY, width: side, height: side)
-        case .expanded(let kind):
-            let w = DockGeom.panelWidth(kind) + DockGeom.tabWidth
-            let h = DockGeom.tabWidth + DockGeom.panelHeight(kind)
+            // 与展开态同尺寸(理由同 verticalFrame 的 .fan 注释)。
+            let w = DockGeom.tabWidth + DockGeom.maxPanelWidth
+            let h = DockGeom.tabWidth + DockGeom.panelHeight(.processes)
+            let x = fromRight ? full.maxX - w : full.minX
+            return NSRect(x: x, y: full.minY, width: w, height: h)
+        case .expanded:
+            // 与左右缘同理:展开窗口恒取最大面板的尺寸。
+            let w = DockGeom.tabWidth + DockGeom.maxPanelWidth
+            let h = DockGeom.tabWidth + DockGeom.panelHeight(.processes)
             let x = fromRight ? full.maxX - w : full.minX
             return NSRect(x: x, y: full.minY, width: w, height: h)
         }
@@ -323,18 +348,19 @@ final class EdgeDockController: NSObject {
         shrinkWork?.cancel(); shrinkWork = nil
 
         if new.rank >= old.rank {
+            // 窗口 frame 只由状态档位决定,且 fan 与 expanded 同尺寸:
+            // 首次拉出和换面板都不再发生窗口 resize,面板挂载没有与 resize
+            // 的同拍竞争,状态同步发布——点击下一拍就动起来,没有死区。
+            // (旧方案"resize 先渲染两帧再发布"的整个延迟机制已随之删除。)
             layout(for: new)
             if new == .fan {
                 model.state = new
                 model.revealTick &+= 1
             } else {
-                // 面板要先完成 resize *并渲染出来* 再让详情滑入。main.async
-                // 不够——SwiftUI 会把 resize 和状态变化合并成一次 pass,
-                // 宽度动画会把整个 deck 拖着走。隔两帧保持两件事分开。
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0 / 60.0) {
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                        self.model.state = new
-                    }
+                // 临界阻尼(1.0):同样快,但没有过冲回弹——欠阻尼弹簧
+                // 收尾要过冲 1~2 次,在大面板上就是肉眼可见的抖动。
+                withAnimation(.spring(response: 0.28, dampingFraction: 1.0)) {
+                    self.model.state = new
                 }
             }
         } else {
@@ -434,8 +460,13 @@ final class EdgeDockController: NSObject {
         noteActivity()
         manager?.dockDidActivate(self)
         setState(.expanded(kind))
-        NSApp.activate()
-        panel.makeKeyAndOrderFront(nil)
+        // 激活与 key 化移出点击帧:首次激活要走窗口服务往返,同步做会让
+        // 动画的第一帧迟到,正是"首次点开顿一下"的来源之一。
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            NSApp.activate()
+            self.panel.makeKeyAndOrderFront(nil)
+        }
     }
 
     /// 关闭详情 → 退回扇形,卡片留在原位;只有完全离开才收起。

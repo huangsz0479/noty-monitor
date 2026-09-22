@@ -7,14 +7,21 @@ enum MonitorTab: String, CaseIterable, Identifiable {
     case memory = "内存"
     case network = "网络"
     case disk = "磁盘"
+    case io = "I/O"
     case battery = "电池"
+    case glm = "智谱"
+    case java = "Java"
     case processes = "进程"
     var id: String { rawValue }
 
-    /// 窗口标签页与贴边卡片保持一致——没有电池的机器不显示电池页。
+    /// 窗口标签页与贴边卡片保持一致——没有电池的机器不显示电池页,
+    /// 没配 API Key 不显示智谱页。
     static var activeTabs: [MonitorTab] {
         var list: [MonitorTab] = [.cpu, .memory, .network, .disk]
+        if EdgeDockCards.cards.contains(.io) { list.append(.io) }
         if EdgeDockCards.cards.contains(.battery) { list.append(.battery) }
+        if EdgeDockCards.cards.contains(.glm) { list.append(.glm) }
+        if EdgeDockCards.cards.contains(.java) { list.append(.java) }
         list.append(.processes)
         return list
     }
@@ -34,7 +41,9 @@ struct MonitorView: View {
     @State private var killErrorText: String?
 
     private var filtered: [ProcInfo] {
-        ProcFilter.apply(store.processes, query: query, onlyMine: onlyMine, sortOrder: sortOrder)
+        var rows = ProcFilter.apply(store.processes, query: query, onlyMine: onlyMine, sortOrder: sortOrder)
+        if tab == .java { rows = rows.filter(\.isJava) }
+        return rows
     }
 
     private var selected: ProcInfo? {
@@ -60,7 +69,9 @@ struct MonitorView: View {
                 sortOrder = [KeyPathComparator(\.cpuPercent, order: .reverse)]
             case .memory:
                 sortOrder = [KeyPathComparator(\.memoryBytes, order: .reverse)]
-            case .network, .battery, .disk, .processes:
+            case .java:
+                sortOrder = [KeyPathComparator(\.cpuPercent, order: .reverse)]
+            case .network, .battery, .disk, .io, .glm, .processes:
                 break
             }
         }
@@ -94,7 +105,7 @@ struct MonitorView: View {
                 ForEach(MonitorTab.activeTabs) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
-            .frame(width: 310)
+            .frame(width: 430)
             .labelsHidden()
 
             Toggle("仅我的进程", isOn: $onlyMine)
@@ -154,6 +165,26 @@ struct MonitorView: View {
                 VolumeGauge(volume: boot)
                     .padding(.top, 14)
             }
+        } else if tab == .io {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("磁盘 I/O — 读 ↓\(store.diskIO.readBytesPerSec.speedText) · 写 ↑\(store.diskIO.writeBytesPerSec.speedText) · IOPS \(Int(store.diskIO.readOpsPerSec + store.diskIO.writeOpsPerSec))")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                NetworkChart(down: store.ioReadHistory, up: store.ioWriteHistory, tint: .blue, upTint: .orange)
+                    .padding(.top, 6)
+            }
+        } else if tab == .java {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(javaSummary)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                if store.processes.contains(where: \.isJava) {
+                    Text("下方进程表只显示 JVM 进程,可排序、搜索与强制退出。堆内存与 GC 等 JVM 内部数据需要 attach,不在监控范围。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         } else if tab == .battery, let battery = store.battery {
             VStack(alignment: .leading, spacing: 4) {
                 Text("电池 — \(Int(battery.percent.rounded())) % · \(battery.isCharging ? "充电中" : (battery.onAC ? "已接电源" : "使用电池"))")
@@ -161,6 +192,21 @@ struct MonitorView: View {
                     .foregroundStyle(.secondary)
                 BatteryGauge(battery: battery)
                     .padding(.top, 14)
+            }
+        } else if tab == .glm {
+            VStack(alignment: .leading, spacing: 4) {
+                if let fiveHour = store.glmPlan?.fiveHour {
+                    Text("智谱 GLM 编码套餐 — 每 5 小时窗口剩 \(Int(fiveHour.remainingPercent.rounded()))%")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("智谱 GLM 编码套餐")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                GLMPlanContent(status: store.glmPlan)
+                    .padding(.top, 10)
+                    .padding(.horizontal, 2)
             }
         } else {
             VStack(alignment: .leading, spacing: 4) {
@@ -173,12 +219,20 @@ struct MonitorView: View {
         }
     }
 
+    private var javaSummary: String {
+        let jvms = store.processes.filter(\.isJava)
+        guard !jvms.isEmpty else { return "Java — 没有正在运行的 JVM 进程" }
+        let memory = jvms.reduce(UInt64(0)) { $0 + $1.memoryBytes }.memoryText
+        let cpu = jvms.reduce(0.0) { $0 + $1.cpuPercent }
+        return "Java — \(jvms.count) 个 JVM · 合计内存 \(memory) · 合计 CPU \(cpu.percentText)"
+    }
+
     // MARK: 进程表
 
     private var processTable: some View {
         Table(filtered, selection: $selectedPID, sortOrder: $sortOrder) {
             TableColumn("进程", value: \.name) { row in
-                Text(row.name)
+                Text(row.isJava ? "☕ \(row.displayName)" : row.name)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .contextMenu {
@@ -246,11 +300,29 @@ struct MonitorView: View {
                     .map { "\($0.name) 剩 \($0.freeBytes.memoryText) / \($0.totalBytes.memoryText)" }
                     .joined(separator: "  ·  "))
                 Spacer()
+            } else if tab == .io {
+                Text("读 \(store.diskIO.readBytesPerSec.speedText) · 写 \(store.diskIO.writeBytesPerSec.speedText)")
+                Text("IOPS \(Int(store.diskIO.readOpsPerSec)) / \(Int(store.diskIO.writeOpsPerSec))")
+                Spacer()
+                Text("累计读 \(store.diskIO.totalReadBytes.memoryText) · 累计写 \(store.diskIO.totalWrittenBytes.memoryText)")
             } else if tab == .battery, let battery = store.battery {
                 Text(battery.isCharging ? "充电中" : (battery.onAC ? "已接电源" : "使用电池"))
                 if let minutes = battery.timeRemainingMinutes {
                     Text("剩余约 \(minutes / 60) 小时 \(minutes % 60) 分钟")
                 }
+                Spacer()
+            } else if tab == .glm {
+                if let status = store.glmPlan {
+                    Text(status.windows
+                        .map { "\($0.label) 剩 \(Int($0.remainingPercent.rounded()))%" }
+                        .joined(separator: "  ·  "))
+                    Spacer()
+                    Text("更新于 \(status.fetchedAt.formatted(date: .omitted, time: .shortened))")
+                } else {
+                    Spacer()
+                }
+            } else if tab == .java {
+                Text(javaSummary)
                 Spacer()
             } else {
                 Text("联动 \(store.system.memoryWiredBytes.memoryText)")

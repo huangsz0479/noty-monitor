@@ -24,7 +24,10 @@ extension DockPanelKind {
         case .memory:    return MetricColor(paper: hex(0xB4E8D0), dash: hex(0x0E9B6E), ink: hex(0x0F2E23))  // Mint
         case .network:   return MetricColor(paper: hex(0xFBCFA6), dash: hex(0xE2762A), ink: hex(0x422413))  // Peach
         case .disk:      return MetricColor(paper: hex(0xE3D3B4), dash: hex(0xA37B3C), ink: hex(0x372C18))  // Sand
+        case .io:        return MetricColor(paper: hex(0xC9D3DE), dash: hex(0x4A6B8A), ink: hex(0x18242F))  // Slate
         case .battery:   return MetricColor(paper: hex(0xFCE795), dash: hex(0xE0AD08), ink: hex(0x3A3008))  // Lemon
+        case .glm:       return MetricColor(paper: hex(0xF7C6CE), dash: hex(0xD8495B), ink: hex(0x3B161C))  // Rose
+        case .java:      return MetricColor(paper: hex(0xCDB492), dash: hex(0x7B4B23), ink: hex(0x2A1A0C))  // Mocha
         case .processes: return MetricColor(paper: hex(0xD9C7FA), dash: hex(0x7C4DEE), ink: hex(0x2A1B44))  // Lilac
         }
     }
@@ -135,29 +138,30 @@ struct EdgeDockRootView: View {
         max(0, h - DockGeom.pillBottomMargin - DockGeom.pillHeight)
     }
 
-    private var cardValues: [DockPanelKind: String] {
-        let all = Dictionary(uniqueKeysWithValues: EdgeDockCards.cards.map {
+    /// 锚点列高:与 hover 无关。"悬停显示数值"只伸缩被悬停的那张卡本身,
+    /// 整列顶端和详情面板的弹出位都用纯标题的列高计算——否则点击后指针
+    /// 离开卡片,列高缩回,整列连同面板当场滑一下(肉眼可见的"跳")。
+    private var anchorStack: CGFloat {
+        let values = Dictionary(uniqueKeysWithValues: EdgeDockCards.cards.map {
             ($0, CardMetrics.value(for: $0, store: store))
         })
-        return CardMetrics.displayValues(all, hovered: dock.hoveredCard,
-                                         hoverReveals: settings.hoverRevealsValue)
+        let titleOnly = CardMetrics.displayValues(values, hovered: nil,
+                                                  hoverReveals: settings.hoverRevealsValue)
+        return CardMetrics.totalHeight(values: titleOnly)
+            + DockGeom.cogGap + DockGeom.cogSize
     }
 
     /// 扇形以 pill 中心为轴向上展开,但不跑出屏幕。
     private func fanTop(panelHeight h: CGFloat) -> CGFloat {
         let pillCenter = h - DockGeom.pillBottomMargin - DockGeom.pillHeight / 2
-        let stack = CardMetrics.totalHeight(values: cardValues)
-            + DockGeom.cogGap + DockGeom.cogSize
-        return min(max(12, pillCenter - stack / 2), max(12, h - stack - 12))
+        return min(max(12, pillCenter - anchorStack / 2), max(12, h - anchorStack - 12))
     }
 
     /// 详情面板固定在整列卡片的旁边垂直居中——所有卡共用一个弹出位,
     /// 稳定可预期,不再跟着被点的卡片上下飞。
     private func panelTop(kind: DockPanelKind, panelHeight h: CGFloat) -> CGFloat {
         let panelH = DockGeom.panelHeight(kind)
-        let stack = CardMetrics.totalHeight(values: cardValues)
-            + DockGeom.cogGap + DockGeom.cogSize
-        let ideal = fanTop(panelHeight: h) + (stack - panelH) / 2
+        let ideal = fanTop(panelHeight: h) + (anchorStack - panelH) / 2
         return min(max(10, ideal), max(10, h - panelH - 10))
     }
 }
@@ -231,9 +235,12 @@ struct MetricFanColumn: View {
 
     /// 卡面上实际显示的数值:由"悬停显示数值"设置决定(hover 模式下只有
     /// 被悬停的卡带数值,其余为空 → 只显示名称、按标题高度布局)。
+    /// 详情面板开着时其卡片"钉住"数值:指针从卡片移进面板会触发 hover
+    /// 退出,不钉住的话这张卡当场缩回、下方卡片集体上移,看起来就是抖动。
     private var displayValues: [DockPanelKind: String] {
         CardMetrics.displayValues(valuesById, hovered: dock.hoveredCard,
-                                  hoverReveals: settings.hoverRevealsValue)
+                                  hoverReveals: settings.hoverRevealsValue,
+                                  pinned: dock.state.expandedKind)
     }
 
     private var layouts: [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] {
@@ -410,20 +417,27 @@ enum CardMetrics {
     }
 
     /// 按显示模式过滤卡面数值:hover 模式只保留被悬停卡的数值(其余按纯标题
-    /// 计高、只显示名称),常显模式原样返回。
+    /// 计高、只显示名称),常显模式原样返回。pinned = 详情面板开着的卡片,
+    /// 数值常显(与 hover 无关,避免面板打开瞬间卡片列重排抖动)。
     static func displayValues(_ values: [DockPanelKind: String], hovered: DockPanelKind?,
-                              hoverReveals: Bool) -> [DockPanelKind: String] {
+                              hoverReveals: Bool, pinned: DockPanelKind? = nil) -> [DockPanelKind: String] {
         guard hoverReveals else { return values }
         return Dictionary(uniqueKeysWithValues: values.map { kind, value in
-            (kind, hovered == kind ? value : "")
+            (kind, hovered == kind || pinned == kind ? value : "")
         })
     }
 
     static func layouts(values: [DockPanelKind: String]) -> [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] {
+        // 未悬停的初始高度整列统一:取"纯标题"最高的那张卡,矮卡补齐到
+        // 同一高度(横排旋转的 CPU/I/O 和竖排双字的内存/智谱不再参差);
+        // 悬停的卡在统一高度之上长出数值。
+        let restHeight = EdgeDockCards.cards
+            .map { measuredHeight(title: $0.rawValue, value: "") }
+            .max() ?? 0
         var result: [(kind: DockPanelKind, y: CGFloat, height: CGFloat)] = []
         var y: CGFloat = 0
         for kind in EdgeDockCards.cards {
-            let h = measuredHeight(title: kind.rawValue, value: values[kind] ?? "")
+            let h = max(measuredHeight(title: kind.rawValue, value: values[kind] ?? ""), restHeight)
             result.append((kind, y, h))
             y += h - DockGeom.tabLap
         }
@@ -447,6 +461,16 @@ enum CardMetrics {
             return store.volumes.first
                 .map { String(format: "%.0f%%", $0.usedFraction * 100) } ?? "—"
         case .battery: return store.battery.map { "\(Int($0.percent.rounded()))%" } ?? "—"
+        case .io: return store.diskIO.totalBytesPerSec.speedText
+        case .glm:
+            if let remaining = store.glmPlan?.fiveHour?.remainingPercent {
+                return String(format: "%.0f%%", remaining)
+            }
+            return store.glmPlan?.error != nil ? "!" : "—"
+        case .java:
+            let jvms = store.processes.filter(\.isJava)
+            guard !jvms.isEmpty else { return "—" }
+            return jvms.reduce(UInt64(0)) { $0 + $1.memoryBytes }.memoryText
         case .processes: return String(store.processes.count)
         }
     }
@@ -680,6 +704,20 @@ struct MetricPanelView: View {
                         .font(.callout)
                         .foregroundStyle(kind.palette.ink.opacity(0.6))
                 }
+            case .io:
+                chartCard(NetworkChart(down: store.ioReadHistory,
+                                       up: store.ioWriteHistory,
+                                       tint: kind.palette.dash,
+                                       upTint: kind.palette.ink.opacity(0.55),
+                                       ink: kind.palette.ink).frame(height: 76))
+                sectionCaption("速率与累计")
+                statRows([
+                    ("读取", "↓ " + store.diskIO.readBytesPerSec.speedText),
+                    ("写入", "↑ " + store.diskIO.writeBytesPerSec.speedText),
+                    ("IOPS(读 / 写)", "\(Int(store.diskIO.readOpsPerSec)) / \(Int(store.diskIO.writeOpsPerSec))"),
+                    ("累计读取", store.diskIO.totalReadBytes.memoryText),
+                    ("累计写入", store.diskIO.totalWrittenBytes.memoryText),
+                ])
             case .battery:
                 if let battery = store.battery {
                     BatteryGauge(battery: battery, ink: kind.palette.ink)
@@ -688,6 +726,10 @@ struct MetricPanelView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
+            case .glm:
+                GLMPlanContent(status: store.glmPlan, ink: kind.palette.ink)
+            case .java:
+                JavaPanelContent(store: store)
             case .processes:
                 ProcessPanelContent(store: store)
             }
@@ -776,7 +818,10 @@ struct MetricPanelView: View {
         case .memory: return "memorychip"
         case .network: return "network"
         case .disk: return "internaldrive"
+        case .io: return "arrow.up.arrow.down"
         case .battery: return "battery.100"
+        case .glm: return "sparkles"
+        case .java: return "cup.and.saucer"
         case .processes: return "list.bullet.rectangle"
         }
     }
@@ -794,6 +839,15 @@ struct MetricPanelView: View {
                 .map { "剩 \($0.freeBytes.memoryText)" } ?? "—"
         case .battery:
             return store.battery.map { "\(Int($0.percent.rounded()))%" } ?? "—"
+        case .io: return store.diskIO.totalBytesPerSec.speedText
+        case .glm:
+            if let remaining = store.glmPlan?.fiveHour?.remainingPercent {
+                return String(format: "%.0f%%", remaining)
+            }
+            return store.glmPlan?.error != nil ? "!" : "—"
+        case .java:
+            let count = store.processes.filter(\.isJava).count
+            return count > 0 ? "\(count) 个" : "—"
         case .processes: return "\(store.processes.count)"
         }
     }
@@ -803,7 +857,9 @@ struct MetricPanelView: View {
     }
 }
 
-/// 详情面板从边缘滑出:长滑动 + 锚定边缘的缩放 + 淡入,由状态机里的弹簧驱动。
+/// 详情面板从边缘滑出:短滑动 + 锚定边缘的轻微缩放 + 淡入,由状态机里的弹簧驱动。
+/// 滑程/缩放刻意收小:大面板(进程 440pt 宽)的比例下,长滑程会让面板
+/// 先压在被点的卡片上"闪现"再挪到位,看起来是从点击位置冒出来抖了一下。
 struct PanelPull: ViewModifier {
     let hidden: Bool
     var edge: DockEdge = .right
@@ -812,14 +868,185 @@ struct PanelPull: ViewModifier {
         let anchor: UnitPoint
         let offset: CGSize
         switch edge {
-        case .right:  anchor = .trailing; offset = CGSize(width: 56, height: 0)
-        case .left:   anchor = .leading;  offset = CGSize(width: -56, height: 0)
-        case .bottomLeft, .bottomRight: anchor = .bottom; offset = CGSize(width: 0, height: 56)
+        case .right:       anchor = .trailing; offset = CGSize(width: 24, height: 0)
+        case .left:        anchor = .leading;  offset = CGSize(width: -24, height: 0)
+        case .bottomLeft, .bottomRight:
+                           anchor = .bottom;   offset = CGSize(width: 0, height: 24)
         }
         return content
             .offset(x: hidden ? offset.width : 0, y: hidden ? offset.height : 0)
-            .scaleEffect(hidden ? 0.94 : 1, anchor: anchor)
+            .scaleEffect(hidden ? 0.97 : 1, anchor: anchor)
             .opacity(hidden ? 0 : 1)
+    }
+}
+
+/// Table(macOS 上是 NSScrollView + NSTableView 后端)挂载的头几拍会闪滚动条:
+/// .scrollIndicators(.hidden) 对这套 AppKit 后端不总生效,而且滚动视图是本视图
+/// 的兄弟子树(不是祖先),只能进窗口后在视图树里搜出来关掉。横竖两条都压:
+/// 滚动本身靠滚轮/触控板,不需要看得见的滚动条。进窗口、每次 SwiftUI 更新都会
+/// 尝试,直到关掉为止。同一时间面板窗口里只有一张表(进程/JVM),全局搜索是安全的。
+private struct HideTableScrollers: NSViewRepresentable {
+    typealias NSViewType = ScrollerKillView
+
+    func makeNSView(context: Context) -> ScrollerKillView {
+        let view = ScrollerKillView()
+        view.tryDisable()
+        return view
+    }
+
+    func updateNSView(_ view: ScrollerKillView, context: Context) {
+        view.tryDisable()
+    }
+}
+
+private final class ScrollerKillView: NSView {
+    private weak var scrollView: NSScrollView?
+
+    /// SwiftUI 每次 update 都会重新配置它背后的滚动视图,横向滚动条可能被
+    /// 改回去,所以不设"完成"标记,每次更新都重新压一遍(幂等且廉价)。
+    func tryDisable() {
+        if let scrollView {
+            apply(scrollView)
+            return
+        }
+        disableInWindow()
+        if scrollView == nil, window != nil {
+            DispatchQueue.main.async { [weak self] in self?.tryDisable() }
+        }
+    }
+
+    /// 首帧绘制前最后一次布局钩子——兄弟子树此时已装配完,在这里关掉
+    /// 滚动条早于任何一帧上屏,闪烁没有露脸的机会。
+    override func viewWillDraw() {
+        super.viewWillDraw()
+        tryDisable()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        tryDisable()
+    }
+
+    private func apply(_ scrollView: NSScrollView) {
+        scrollView.hasHorizontalScroller = false
+        scrollView.horizontalScroller?.removeFromSuperview()
+        scrollView.horizontalScroller = nil
+        scrollView.horizontalScrollElasticity = .none
+        scrollView.hasVerticalScroller = false
+        scrollView.verticalScroller?.removeFromSuperview()
+        scrollView.verticalScroller = nil
+    }
+
+    private func disableInWindow() {
+        guard let root = window?.contentView else { return }
+        var stack: [NSView] = [root]
+        while let node = stack.popLast() {
+            if let scrollView = node as? NSScrollView {
+                self.scrollView = scrollView
+                apply(scrollView)
+                return
+            }
+            stack.append(contentsOf: node.subviews)
+        }
+    }
+}
+
+// MARK: - Java 面板
+
+/// JVM 进程列表:识别自可执行路径(/bin/java 结尾),业务标签取 -jar 包名
+/// 或主类末段。汇总行 + 表格 + 强杀,交互与进程面板同款。
+struct JavaPanelContent: View {
+    @ObservedObject var store: MonitorStore
+    @State private var selectedPID: Int32?
+    @State private var killErrorText: String?
+    @State private var sortOrder = [KeyPathComparator(\ProcInfo.cpuPercent, order: .reverse)]
+
+    private var jvms: [ProcInfo] {
+        store.processes.filter(\.isJava)
+    }
+    private var totalMemoryBytes: UInt64 { jvms.reduce(0) { $0 + $1.memoryBytes } }
+    private var totalCPU: Double { jvms.reduce(0) { $0 + $1.cpuPercent } }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if jvms.isEmpty {
+                Text("没有正在运行的 Java 进程")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 32)
+                Spacer(minLength: 0)
+            } else {
+                HStack(spacing: 8) {
+                    Text("\(jvms.count) 个 JVM · 合计内存 \(totalMemoryBytes.memoryText) · CPU \(totalCPU.percentText)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Button {
+                        if let row = jvms.first(where: { $0.id == selectedPID }) { doKill(row) }
+                    } label: {
+                        Image(systemName: "xmark.octagon.fill")
+                            .foregroundStyle(.white, .red)
+                    }
+                    .disabled(selectedPID == nil)
+                    .buttonStyle(.plain)
+                    .help("强制退出选中进程")
+                }
+                Table(jvms, selection: $selectedPID, sortOrder: $sortOrder) {
+                    TableColumn("进程", value: \.displayName) { row in
+                        Text(row.javaLabel ?? row.name)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .contextMenu {
+                                Button("强制退出 \(row.displayName)", role: .destructive) {
+                                    doKill(row)
+                                }
+                            }
+                    }
+                    .width(min: 60, ideal: 270)
+                    TableColumn("PID", value: \.pid) { row in
+                        Text(String(row.pid))
+                            .font(.system(.callout, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    .width(min: 54, ideal: 64, max: 64)
+                    TableColumn("CPU", value: \.cpuPercent) { row in
+                        Text(row.cpuPercent.percentText)
+                            .monospacedDigit()
+                            .foregroundStyle(row.cpuPercent > 90 ? .red : (row.cpuPercent > 50 ? .orange : .primary))
+                    }
+                    .width(min: 54, ideal: 64, max: 64)
+                    TableColumn("内存", value: \.memoryBytes) { row in
+                        Text(row.memoryBytes.memoryText)
+                            .monospacedDigit()
+                    }
+                    .width(min: 70, ideal: 78, max: 78)
+                    TableColumn("线程", value: \.threadCount) { row in
+                        Text(String(row.threadCount))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    .width(min: 44, ideal: 50, max: 50)
+                }
+                .scrollIndicators(.hidden)
+                .background(HideTableScrollers())
+                .frame(maxHeight: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+        }
+        .alert("无法退出进程", isPresented: Binding(
+            get: { killErrorText != nil },
+            set: { if !$0 { killErrorText = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(killErrorText ?? "")
+        }
+    }
+
+    private func doKill(_ target: ProcInfo) {
+        if store.forceQuit(pid: target.pid) { return }
+        killErrorText = "无法结束 PID \(target.pid)(\(target.displayName))"
     }
 }
 
@@ -862,7 +1089,7 @@ struct ProcessPanelContent: View {
 
             Table(filtered, selection: $selectedPID, sortOrder: $sortOrder) {
                 TableColumn("进程", value: \.name) { row in
-                    Text(row.name)
+                    Text(row.isJava ? "☕ \(row.displayName)" : row.name)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .contextMenu {
@@ -871,19 +1098,25 @@ struct ProcessPanelContent: View {
                             }
                         }
                 }
+                // 列宽策略:CPU/内存钉死,"进程"吸收全部伸缩。理想宽度必给,
+                // 否则初次布局会按最长进程名的自然宽度铺开、溢出一拍再收缩
+                // (横向滚动条"闪两下"的第二下)。三列最小总宽 ~182pt,任何
+                // 时刻都装得下,横向滚动条从根上没有出现的理由。
+                .width(min: 40, ideal: 200)
                 TableColumn("CPU", value: \.cpuPercent) { row in
                     Text(row.cpuPercent.percentText)
                         .monospacedDigit()
                         .foregroundStyle(row.cpuPercent > 90 ? .red : (row.cpuPercent > 50 ? .orange : .primary))
                 }
-                .width(min: 52, ideal: 60)
+                .width(min: 54, ideal: 64, max: 64)
                 TableColumn("内存", value: \.memoryBytes) { row in
                     Text(row.memoryBytes.memoryText)
                         .monospacedDigit()
                 }
-                .width(min: 66, ideal: 76)
+                .width(min: 70, ideal: 78, max: 78)
             }
             .scrollIndicators(.hidden)
+            .background(HideTableScrollers())
             .defaultScrollAnchor(.top)
             .frame(maxHeight: .infinity)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -982,6 +1215,90 @@ struct BatteryGauge: View {
         let hours = minutes / 60
         let mins = minutes % 60
         return battery.isCharging ? "约 \(hours) 小时 \(mins) 分钟充满" : "约 \(hours) 小时 \(mins) 分钟"
+    }
+}
+
+// MARK: - 智谱套餐面板
+
+/// 智谱 GLM 编码套餐的余量:每个配额窗口一条"标签 + 余量 + 进度条",
+/// 底部一行说明更新时间与错误。贴边详情面板与完整窗口共用。
+struct GLMPlanContent: View {
+    let status: GLMPlanStatus?
+    var ink: Color = .secondary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let status {
+                if status.windows.isEmpty, let error = status.error {
+                    Text(error)
+                        .font(.callout)
+                        .foregroundStyle(ink.opacity(0.65))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(status.windows) { window in
+                    windowRow(window)
+                }
+                Spacer(minLength: 0)
+                Text(footerText(status))
+                    .font(.caption2)
+                    .foregroundStyle(ink.opacity(0.45))
+            } else {
+                Text("未设置 API Key。在「设置」里粘贴 bigmodel.cn 控制台的 API Key 后,这里会显示编码套餐余量。")
+                    .font(.callout)
+                    .foregroundStyle(ink.opacity(0.65))
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func windowRow(_ window: GLMQuotaWindow) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(window.label)
+                Spacer()
+                Text(window.remainingText.map { "剩 \($0)" }
+                    ?? "剩 \(Int(window.remainingPercent.rounded()))%")
+                    .monospacedDigit()
+                    .fontWeight(.medium)
+            }
+            .font(.callout)
+            .foregroundStyle(ink.opacity(0.85))
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(ink.opacity(0.14))
+                    Capsule()
+                        .fill(Color.loadTint(window.usedFraction))
+                        .frame(width: max(8, geo.size.width * window.usedFraction))
+                }
+            }
+            .frame(height: 9)
+            .animation(.spring(response: 0.5, dampingFraction: 0.85), value: window.usedFraction)
+
+            Text(resetText(window.resetDate))
+                .font(.caption)
+                .foregroundStyle(ink.opacity(0.5))
+        }
+    }
+
+    private func resetText(_ date: Date) -> String {
+        let interval = date.timeIntervalSinceNow
+        guard interval > 0 else { return "已到重置时间" }
+        let total = Int(interval.rounded())
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        if hours > 0 { return "\(hours) 小时 \(minutes) 分后重置" }
+        return "\(minutes) 分钟后重置"
+    }
+
+    private func footerText(_ status: GLMPlanStatus) -> String {
+        let time = status.fetchedAt.formatted(date: .omitted, time: .shortened)
+        let level = status.level.map { " · \($0.capitalized) 版" } ?? ""
+        if let error = status.error {
+            return "更新于 \(time) · \(error)"
+        }
+        return "更新于 \(time)\(level) · 数据来自 bigmodel.cn"
     }
 }
 
