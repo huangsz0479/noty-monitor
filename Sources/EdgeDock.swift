@@ -54,6 +54,8 @@ final class EdgeDockModel: ObservableObject {
     @Published var fanHeight: CGFloat = 0   // 卡片列实测自然高度
     /// 左右缘小圆点离可见区底边的距离,已按当前屏幕夹取。下角布局不用。
     @Published var verticalOffset: CGFloat = DockGeom.pillBottomMargin
+    /// 右下角详情面板底部让出的高度,等于没悬停时那排卡片的高度。
+    @Published var bottomClearance: CGFloat = 0
 
     init(edge: DockEdge) { self.edge = edge }
 }
@@ -420,6 +422,8 @@ final class EdgeDockController: NSObject {
     /// 下缘:pill/卡片横躺成一排,面板锚在对应的下角向对侧、向上生长。
     /// 贴屏幕真正的底边(而不是 visibleFrame 底边)——盖在 Dock 区域上。
     private func bottomFrame(_ state: EdgeDockState, full: NSRect, fromRight: Bool) -> NSRect {
+        // 扇形和展开共用这份让位,点开详情时窗口不再长高。
+        let clearance = updateBottomClearance()
         switch state {
         case .rest:
             let size = DockGeom.horizontalPillSize
@@ -431,25 +435,36 @@ final class EdgeDockController: NSObject {
             return NSRect(x: x, y: full.minY, width: w, height: h)
         case .peek:
             // 下角不读 vis:探出的卡贴屏幕真底边,和静止 pill 同一个 y。
-            return peekFrame(full: full, vis: full, fromRight: fromRight, vertical: false)
+            return peekFrame(full: full, vis: full, fromRight: fromRight, vertical: false,
+                             clearance: clearance)
         case .fan:
             // 与展开态同尺寸(理由同 verticalFrame 的 .fan 注释)。
+            // 高度按卡片直立的高度让位,不能只用纸条宽:否则详情纸面会盖住卡片。
             let w = DockGeom.tabWidth + DockGeom.maxPanelWidth
-            let h = DockGeom.tabWidth + DockGeom.panelHeight(.processes)
+            let h = min(full.height, clearance + DockGeom.panelHeight(.processes))
             let x = fromRight ? full.maxX - w : full.minX
             return NSRect(x: x, y: full.minY, width: w, height: h)
         case .expanded:
             // 与左右缘同理:展开窗口恒取最大面板的尺寸。
             let w = DockGeom.tabWidth + DockGeom.maxPanelWidth
-            let h = DockGeom.tabWidth + DockGeom.panelHeight(.processes)
+            let h = min(full.height, clearance + DockGeom.panelHeight(.processes))
             let x = fromRight ? full.maxX - w : full.minX
             return NSRect(x: x, y: full.minY, width: w, height: h)
         }
     }
 
+    /// 右下角详情面板贴着没悬停的卡片。悬停拉高的那一截可以伸到面板后面。
+    private func updateBottomClearance() -> CGFloat {
+        let clearance = CardMetrics.bottomRestHeight()
+        if abs(model.bottomClearance - clearance) > 0.5 {
+            model.bottomClearance = clearance
+        }
+        return clearance
+    }
+
     /// 只装下一张探出的卡。垂直时贴可见区底边,下角时贴屏幕真底边,和静止 pill 对齐。
     private func peekFrame(full: NSRect, vis: NSRect, fromRight: Bool, vertical: Bool,
-                           offset: CGFloat = 0) -> NSRect {
+                           offset: CGFloat = 0, clearance: CGFloat = 0) -> NSRect {
         if vertical {
             let w = DockGeom.tabWidth + DockGeom.bleed + 20
             let needed = offset + DockGeom.pillHeight + 36
@@ -461,7 +476,7 @@ final class EdgeDockController: NSObject {
         let w = max(pill.width + DockGeom.bottomCornerInset + 1,
                     DockGeom.tabWidth + DockGeom.cogSize + DockGeom.cogGap
                         + DockGeom.bottomCornerInset + 28)
-        let h: CGFloat = 240
+        let h = max(240, clearance + 24)
         let x = fromRight ? full.maxX - w : full.minX
         return NSRect(x: x, y: full.minY, width: w, height: h)
     }
@@ -686,7 +701,10 @@ final class EdgeDockController: NSObject {
         case .left:
             return NSRect(x: f.minX, y: f.minY, width: depth, height: f.height)
         case .bottomRight:
-            return NSRect(x: f.minX, y: f.minY, width: f.width, height: depth)
+            // 热区盖住直立卡面,包括悬停后往上长出的那一截。
+            let reach = CardMetrics.bottomRowHeight(store: MonitorStore.shared)
+            let cardDepth = max(depth, model.bottomClearance, reach)
+            return NSRect(x: f.minX, y: f.minY, width: f.width, height: cardDepth)
         }
     }
 
@@ -860,6 +878,19 @@ final class EdgeDockManager {
             .receive(on: RunLoop.main)
             .sink { [weak self] kind in
                 self?.docks.values.forEach { $0.applyAttention(kind) }
+            }
+            .store(in: &bag)
+        // 卡片高度是异步实测的。实测落地后重排,右下角的让位才跟得上真高。
+        MonitorStore.shared.$layoutTick
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.layoutAllDocks()
+            }
+            .store(in: &bag)
+        CardSettings.shared.$enabled
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.layoutAllDocks()
             }
             .store(in: &bag)
         CardSettings.shared.$pulseEnabled

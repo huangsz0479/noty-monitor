@@ -84,6 +84,7 @@ struct EdgeDockRootView: View {
                 // 最后声明,盖住卡片列,贴屏幕边缘。
                 if let kind = dock.state.expandedKind {
                     MetricPanelView(kind: kind, store: store, edge: edge,
+                                    stripReserve: dock.bottomClearance,
                                     onClose: {
                                         if controller.consumeDragClick() { return }
                                         controller.collapse()
@@ -496,6 +497,24 @@ enum CardMetrics {
         return last.y + last.height
     }
 
+    /// 右下角没悬停时的排高:和 layouts 的纯标题统一高度同一口径。
+    static func bottomRestHeight() -> CGFloat {
+        let order = EdgeDockCards.cards
+        guard !order.isEmpty else { return 0 }
+        return order.map { measuredHeight(title: $0.rawValue, value: "") }.max() ?? 0
+    }
+
+    /// 右下角悬停亮出数值后,最高那张卡的高度。热区用它,面板不用。
+    static func bottomRowHeight(store: MonitorStore) -> CGFloat {
+        let order = EdgeDockCards.cards
+        guard !order.isEmpty else { return 0 }
+        let rest = bottomRestHeight()
+        let grown = order.map { kind in
+            measuredHeight(title: kind.rawValue, value: value(for: kind, store: store))
+        }.max() ?? 0
+        return max(rest, grown)
+    }
+
     static func value(for kind: DockPanelKind, store: MonitorStore) -> String {
         switch kind {
         case .cpu:
@@ -705,6 +724,8 @@ struct MetricPanelView: View {
     @ObservedObject var store: MonitorStore
     @ObservedObject private var notes = NoteStore.shared
     var edge: DockEdge = .right
+    /// 右下角让给直立卡片的高度。左右缘不用,纸条宽由 panelInset 自己留。
+    var stripReserve: CGFloat = 0
     let onClose: () -> Void
 
     var body: some View {
@@ -795,11 +816,12 @@ struct MetricPanelView: View {
         .frame(width: DockGeom.panelWidth(kind),
                height: DockGeom.panelHeight(kind), alignment: .topLeading)
         .background(
-            // 四角全圆的彩纸面板。
+            // 四角全圆的彩纸面板。右下角阴影朝上,避免落在底边的卡片上。
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(kind.palette.paper)
                 .shadow(color: .black.opacity(0.30), radius: 16,
-                        x: edge == .left ? 5 : -5, y: 4)
+                        x: edge == .left ? 5 : (edge.isBottom ? 0 : -5),
+                        y: edge.isBottom ? -4 : 4)
         )
         // 背向停靠边缘让出贴边卡片条的位置,不盖住展开的标签条。
         .padding(panelInset)
@@ -823,7 +845,7 @@ struct MetricPanelView: View {
         switch edge {
         case .right:  return EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: DockGeom.tabWidth)
         case .left:   return EdgeInsets(top: 0, leading: DockGeom.tabWidth, bottom: 0, trailing: 0)
-        case .bottomRight: return EdgeInsets(top: 0, leading: 0, bottom: DockGeom.tabWidth, trailing: 0)
+        case .bottomRight: return EdgeInsets(top: 0, leading: 0, bottom: stripReserve, trailing: 0)
         }
     }
 
@@ -942,7 +964,7 @@ struct PanelPull: ViewModifier {
         case .right:       anchor = .trailing; offset = CGSize(width: 24, height: 0)
         case .left:        anchor = .leading;  offset = CGSize(width: -24, height: 0)
         case .bottomRight:
-                           anchor = .bottom;   offset = CGSize(width: 0, height: 24)
+                           anchor = .bottom;   offset = CGSize(width: 0, height: 12)
         }
         return content
             .offset(x: hidden ? offset.width : 0, y: hidden ? offset.height : 0)
@@ -1600,13 +1622,15 @@ struct GLMPlanContent: View {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule().fill(ink.opacity(0.14))
+                    // 条的长度是还剩多少,和旁边的「剩 xx%」同一口径。
+                    // 颜色仍按已用比例:剩得少才变红。
                     Capsule()
                         .fill(Color.loadTint(window.usedFraction))
-                        .frame(width: max(8, geo.size.width * window.usedFraction))
+                        .frame(width: max(8, geo.size.width * window.remainingPercent / 100))
                 }
             }
             .frame(height: 9)
-            .animation(.spring(response: 0.5, dampingFraction: 0.85), value: window.usedFraction)
+            .animation(.spring(response: 0.5, dampingFraction: 0.85), value: window.remainingPercent)
 
             Text(resetText(window.resetDate))
                 .font(.caption)
