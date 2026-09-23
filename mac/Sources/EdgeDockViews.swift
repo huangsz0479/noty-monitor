@@ -1367,7 +1367,7 @@ struct ProcessPanelContent: View {
     @State private var killErrorText: String?
 
     private var ranked: [ProcInfo] {
-        store.processes.filter { !ProcessDigest.noiseNames.contains($0.name) }
+        store.processes.filter { !MacProcessNoise.names.contains($0.name) }
     }
     private var topCPU: [ProcInfo] {
         Array(ranked.sorted { $0.cpuPercent > $1.cpuPercent }.prefix(6))

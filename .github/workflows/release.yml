@@ -64,8 +64,8 @@ jobs:
           BUILD_NUMBER: ${{ steps.v.outputs.build }}
         run: |
           ./build.sh release
-          lipo -info build/SysMon.app/Contents/MacOS/SysMon | grep -Eq 'arm64.*x86_64|x86_64.*arm64'
-          codesign --verify --deep --strict build/SysMon.app
+          lipo -info mac/build/SysMon.app/Contents/MacOS/SysMon | grep -Eq 'arm64.*x86_64|x86_64.*arm64'
+          codesign --verify --deep --strict mac/build/SysMon.app
 
       - name: Package
         if: steps.v.outputs.skip != 'true'
@@ -73,8 +73,8 @@ jobs:
           VERSION: ${{ steps.v.outputs.version }}
         run: |
           # ditto 保留元数据与签名,是分发 .app 的正确打包方式。
-          ditto -c -k --keepParent build/SysMon.app "build/SysMon-${VERSION}.zip"
-          shasum -a 256 "build/SysMon-${VERSION}.zip" > build/SHA256SUMS.txt
+          ditto -c -k --keepParent mac/build/SysMon.app "mac/build/SysMon-${VERSION}.zip"
+          shasum -a 256 "mac/build/SysMon-${VERSION}.zip" > mac/build/SHA256SUMS.txt
 
       - name: Publish the release
         if: steps.v.outputs.skip != 'true'
@@ -84,7 +84,7 @@ jobs:
           TAG: ${{ steps.v.outputs.tag }}
         run: |
           gh release create "$TAG" \
-            "build/SysMon-${VERSION}.zip" build/SHA256SUMS.txt \
+            "mac/build/SysMon-${VERSION}.zip" mac/build/SHA256SUMS.txt \
             --title "SysMon ${VERSION}" \
             --target "$GITHUB_SHA" \
             --notes "Universal binary(Apple Silicon 与 Intel)。下载解压后把 SysMon.app 拖入「应用程序」即可。" \

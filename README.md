@@ -3,7 +3,7 @@
 基于 [noty](https://github.com/aimen08/noty)(MIT 许可)改造的 macOS 系统监视器,
 贴边常驻形态。noty 的便签数据层已移除,完整移植了它的贴边交互机制
 (静止 pill → 扇形展开 → 拉出详情)并接上系统监控数据,
-保留了它的命令行构建方案(`build.sh`,无需 Xcode)与 App 装配骨架。
+macOS 与 Windows 分目录。macOS 仍用命令行构建(`mac/build.sh`,无需 Xcode)。
 
 ## 使用
 
@@ -39,10 +39,12 @@
 应用本身仅支持 macOS 26+):
 
 ```bash
-./build.sh          # release 构建 → build/SysMon.app
-./build.sh debug    # 快速构建
-./build.sh run      # 构建并启动
+./mac/build.sh          # release 构建 → mac/build/SysMon.app
+./mac/build.sh debug    # 快速构建
+./mac/build.sh run      # 构建并启动
 ```
+
+仓库根目录的 `./build.sh` 会转到 `mac/build.sh`。`./build.sh win` 构建 Windows 工程(`win/`)。
 
 ## 与原版 noty 的关系
 

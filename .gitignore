@@ -1,4 +1,5 @@
 build/
+target/
 *.dmg
 *.zip
 .DS_Store

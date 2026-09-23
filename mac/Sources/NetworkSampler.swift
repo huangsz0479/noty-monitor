@@ -119,13 +119,6 @@ final class NetworkSampler {
 
 // MARK: - 电池
 
-struct BatteryInfo: Equatable {
-    var percent: Double
-    var isCharging: Bool
-    var onAC: Bool
-    var timeRemainingMinutes: Int?    // nil = 计算中或不可用
-}
-
 /// IOPowerSources 公开接口,读取首块在场的电池。台式机返回 nil。
 enum BatteryReader {
     static func read() -> BatteryInfo? {

@@ -15,12 +15,6 @@ struct ProcessDigest: Equatable {
     /// 当前最忙的非系统进程,给"今天峰值"那句话用。
     var busiestName: String?
 
-    /// 这些名字几乎总在榜首,但不是用户在找的"谁"。
-    static let noiseNames: Set<String> = [
-        "kernel_task", "WindowServer", "loginwindow", "sysmond",
-        "corespotlightd", "mds", "mds_stores", "SysMon",
-    ]
-
     /// 卡面竖排装不下长名字,超长就截到还能看的长度。
     static func cardToken(_ name: String) -> String? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)

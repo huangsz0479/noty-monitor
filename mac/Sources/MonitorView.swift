@@ -506,7 +506,6 @@ struct NetworkChart: View {
 // MARK: - 格式化
 
 extension Double {
-    var percentText: String { String(format: "%.1f %%", self) }
     var loadText: String { String(format: "%.2f", self) }
     /// 速率自适应单位:B/s → KB/s → MB/s。
     var speedText: String {

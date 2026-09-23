@@ -8,6 +8,8 @@
 删掉了它的便签数据层（SQLite/AES、编辑器、云同步、Sparkle 更新等），接上
 系统监控数据：CPU / 内存 / 网络 / 磁盘 / 电池 / 进程表（搜索、排序、强制退出）。
 
+目录：`mac/` 是 macOS 应用（贴边窗口、SwiftUI、系统采集），`win/` 是 Windows 应用（Rust + 系统 WebView，贴边窗口和采集都在这里，`cargo run --manifest-path win/Cargo.toml` 或 `./build.sh win`）。`shared/Sources/` 是 macOS 仍在编译的共用服务（提醒规则、智谱余量、进程行和命令行标签）。贴边界面各画各的：macOS 用 SwiftUI，Windows 用同一套纸色、尺寸和扇形节奏。Windows 侧还没有声音律动，也没有单独的 980×640 完整窗口。
+
 形态：平时只有屏幕边缘一个 14pt 小圆点（无 Dock 图标的 accessory App，
 停靠位置可选左缘/右缘/右下角，UserDefaults key `dockEdge`，默认
 右缘；顶缘让给菜单栏；右下角贴屏幕真底边、盖在 Dock 区域上），hover 展开
@@ -20,24 +22,28 @@
 
 ## 构建与运行
 
-无 Xcode 工程、无 Package.swift、零第三方依赖。`build.sh` 用 swiftc 直接把
-`Sources/*.swift` 逐架构编译成 app（**Sources/ 下所有 .swift 都会被编进去，
+无 Xcode 工程、无 Package.swift、macOS 侧零第三方依赖。`mac/build.sh` 用 swiftc 直接把
+`mac/Sources/*.swift` 和 `shared/Sources/*.swift` 逐架构编译成 app（**这两个目录下所有 .swift 都会被编进去，
 不能放不参与编译的文件**）：
 
 ```bash
-./build.sh          # release，默认 universal（arm64 + x86_64）
-./build.sh debug    # 只编本机架构，不优化，快
-./build.sh run      # 构建并重启 App
+./mac/build.sh          # release，默认 universal（arm64 + x86_64）
+./mac/build.sh debug    # 只编本机架构，不优化，快
+./mac/build.sh run      # 构建并重启 App
 ```
+
+仓库根的 `./build.sh` 不带参数时转发到 `mac/build.sh`。`./build.sh win` 用 cargo 构建 `win/`。
 
 - 版本号经环境变量 `MARKETING_VERSION` / `BUILD_NUMBER` 注入 Info.plist；
   签名身份 `CODESIGN_IDENTITY`（默认 ad-hoc `-`）。
 - 开发环境要求 macOS 15+ 与 Xcode CLT；deployment target 为 `macosx26.0`
   （build.sh 里 `-target`），用了 SwiftUI Charts（macOS 14+ API）。
-- **没有测试套件**（noty 的 Tests/ 已随改造删除）。改完至少跑一次
-  `./build.sh debug` 验证可编译。
+- 翻页测试在 `mac/Tests/`，不参与 `build.sh`。改完至少跑一次
+  `./mac/build.sh debug` 验证可编译。
 
 ## 架构（数据流：Sampler → MonitorStore → SwiftUI）
+
+下面列的 Swift 文件都在 `mac/Sources/`。例外在 `shared/Sources/`：`DockPanelKind`、`BatteryInfo`、`ProcInfo` / `ProcFilter` / `RuntimeLabels`、`DockSignals`（进程摘要、彩条、提醒）、`GLMPlanUsage`、`percentText`。
 
 - `Main.swift` — `@main`，NSApplication 装配，accessory 策略。
 - `AppDelegate.swift` — 组装 `EdgeDockManager`、启动 `MonitorStore`；
@@ -122,6 +128,6 @@ SysMon.app；`release.yml` 改为 workflow_dispatch 手动发版（输入版本�
 已随站点删除。两个 workflow 都显式选择 runner 上最新的 Xcode
 （部署目标 macosx26.0 需要 macOS 26 SDK）。
 
-App 图标是六色彩条（`Resources/AppIcon.icns` 直接提交，生成脚本未入库）；
+App 图标是六色彩条（`mac/Resources/AppIcon.icns` 直接提交，生成脚本未入库）；
 `.github` 之外无遗留 noty 资产。仍无测试套件。`CFBundleIdentifier`
 还是占位的 `local.sysmon.SysMon`，对外分发前建议换成正式 reverse-DNS。

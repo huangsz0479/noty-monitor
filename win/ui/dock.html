@@ -1,0 +1,1179 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SysMon</title>
+<style>
+  :root { color-scheme: light; }
+  html, body {
+    margin: 0; height: 100%; background: transparent; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  button, input, textarea { font: inherit; }
+  #app { height: 100%; position: relative; }
+  #pill {
+    position: absolute; box-sizing: border-box; z-index: 4;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.55);
+    -webkit-backdrop-filter: blur(18px) saturate(1.5);
+    backdrop-filter: blur(18px) saturate(1.5);
+    box-shadow: -2px 1px 6px rgba(0, 0, 0, 0.22);
+    display: flex; align-items: center; justify-content: center;
+    opacity: 1;
+  }
+  .edge-right #pill { right: 0; }
+  .edge-left #pill { left: 0; box-shadow: 2px 1px 6px rgba(0, 0, 0, 0.22); }
+  .mode-rest #pill, .mode-menu #pill { width: 100%; height: 100%; top: 0; }
+  /* 展开立刻灭掉小圆点。收回时等最后一张卡落定再亮。 */
+  .mode-fan #pill, .mode-peek #pill, .mode-expanded #pill, .mode-settings #pill {
+    opacity: 0; pointer-events: none; transition: none;
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+  }
+  .mode-closing #pill {
+    opacity: 1; pointer-events: none;
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+    transition: opacity .1s linear;
+    transition-delay: var(--pill-in, .45s);
+  }
+  #dashes { display: flex; gap: 5px; }
+  .edge-right #dashes, .edge-left #dashes { flex-direction: column; padding: 7px 0; }
+  .dash {
+    width: 7px; height: 14px; border-radius: 2.5px;
+    transition: opacity .35s ease;
+  }
+  .dash.alert { animation: breathe 1.6s ease-in-out infinite; }
+  @keyframes breathe { 50% { opacity: .38; } }
+  #row { display: none; height: 100%; width: 100%; position: absolute; inset: 0; pointer-events: none; }
+  .mode-fan #row, .mode-peek #row, .mode-expanded #row, .mode-settings #row, .mode-closing #row { display: block; }
+  #stage { position: absolute; top: 0; bottom: 0; pointer-events: none; }
+  .edge-right #stage { right: 0; width: 30px; }
+  .edge-left #stage { left: 0; width: 30px; }
+  #line {
+    position: absolute; pointer-events: none; opacity: 0; width: 0;
+    border-left: 1px dashed rgba(255,255,255,.35);
+  }
+  /* 虚线跟着第一张卡的弹簧淡入，不在展开瞬间跳出来。 */
+  .edge-right #line { right: 3px; }
+  .edge-left #line { left: 3px; }
+  .tab, #cog, #panel, #menu { pointer-events: auto; }
+  .tab {
+    position: absolute; border: 0; padding: 0; margin: 0; cursor: pointer;
+    background: transparent; color: #1a1a1a;
+    -webkit-appearance: none; appearance: none;
+    opacity: 0; overflow: visible;
+    width: 44px;
+    transform: translate3d(54px, 0, 0) rotate(-3deg);
+    transform-origin: right center;
+  }
+  .edge-right .tab { right: -14px; }
+  .edge-left .tab { left: -14px; transform: translate3d(-54px, 0, 0) rotate(3deg); transform-origin: left center; }
+  .tab:active .paper { transform: scale(.97); transition: transform .12s ease-out; }
+  .paper {
+    height: 100%; box-sizing: border-box;
+    display: flex; align-items: flex-start; justify-content: center;
+    padding-top: 6px;
+    box-shadow: -3px 2px 6px rgba(0,0,0,.22);
+    overflow: hidden;
+  }
+  .tab.open .paper { box-shadow: -3px 2px 10px rgba(0,0,0,.32); }
+  .edge-left .paper { box-shadow: 3px 2px 6px rgba(0,0,0,.22); border-radius: 0 11px 11px 0; padding-left: 14px; }
+  .edge-right .paper { border-radius: 11px 0 0 11px; padding-right: 14px; }
+  .stack { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; max-height: 100%; }
+  .upright { display: flex; flex-direction: column; align-items: center; gap: 1px; }
+  .upright span { font-size: 11.5px; font-weight: 600; line-height: 16px; }
+  .turned { width: 14px; position: relative; flex: none; }
+  .turned-inner {
+    position: absolute; left: 50%; top: 50%;
+    height: 14px; line-height: 14px; white-space: nowrap;
+    transform: translate(-50%, -50%) rotate(90deg);
+  }
+  #cog {
+    position: absolute; width: 24px; height: 24px; border: 0; border-radius: 50%;
+    background: rgba(255,255,255,.72);
+    box-shadow: 0 1px 4px rgba(0,0,0,.18);
+    color: rgba(0,0,0,.55); cursor: pointer; padding: 0;
+    display: grid; place-items: center;
+    opacity: 0;
+  }
+  #cog:hover { color: rgba(0,0,0,.8); }
+  .edge-right #cog { right: 3px; }
+  .edge-left #cog { left: 3px; }
+  #panel {
+    display: none; box-sizing: border-box; position: absolute;
+    flex-direction: column; gap: 12px;
+    border-radius: 16px; padding: 14px; overflow: hidden;
+    box-shadow: -5px 4px 16px rgba(0,0,0,.30);
+    opacity: 0;
+  }
+  .edge-right #panel { right: 30px; transform-origin: right center; }
+  .edge-left #panel { left: 30px; box-shadow: 5px 4px 16px rgba(0,0,0,.30); transform-origin: left center; }
+  .head { display: flex; align-items: center; gap: 10px; }
+  .badge {
+    width: 24px; height: 24px; border-radius: 7px; background: rgba(255,255,255,.35);
+    display: grid; place-items: center; flex: none;
+  }
+  .badge svg { width: 13px; height: 13px; }
+  .title { font-size: 13px; font-weight: 600; opacity: .7; }
+  .head-val {
+    margin-left: auto; font-size: 18px; font-weight: 700;
+    font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+  }
+  .x {
+    border: 0; background: transparent; cursor: pointer; opacity: .5; padding: 0; line-height: 0;
+  }
+  .x:hover { opacity: .8; }
+  .chart {
+    background: rgba(255,255,255,.30); border-radius: 12px; padding: 8px; height: 76px;
+  }
+  .chart canvas { width: 100%; height: 60px; display: block; }
+  .cap { font-size: 12px; opacity: .55; margin: 0 0 0 2px; }
+  .rows { display: flex; flex-direction: column; }
+  .rowline {
+    display: flex; justify-content: space-between; gap: 12px;
+    padding: 7px 0; font-size: 15px; border-top: 1px solid rgba(0,0,0,.08);
+  }
+  .rowline:first-child { border-top: 0; }
+  .rowline span:first-child { opacity: .72; }
+  .rowline span:last-child { font-variant-numeric: tabular-nums; font-weight: 500; }
+  .gauge { height: 10px; border-radius: 6px; background: rgba(255,255,255,.45); overflow: hidden; }
+  .gauge i { display: block; height: 100%; border-radius: 6px; }
+  .search {
+    width: 100%; box-sizing: border-box; border: 0; border-radius: 8px;
+    background: rgba(255,255,255,.45); padding: 6px 8px; outline: none;
+  }
+  .plist { overflow: auto; flex: 1; min-height: 0; }
+  .plist::-webkit-scrollbar { width: 0; height: 0; }
+  .prow {
+    display: grid; grid-template-columns: 1fr 52px 58px 64px;
+    gap: 6px; padding: 5px 2px; font-size: 12px; border-radius: 6px; cursor: default;
+  }
+  .prow.headrow { opacity: .55; font-size: 11px; }
+  .prow.on { background: rgba(255,255,255,.45); }
+  .prow b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kill {
+    border: 0; background: #e24b4b; color: white; border-radius: 7px;
+    padding: 3px 8px; cursor: pointer; font-size: 12px;
+  }
+  .kill:disabled { opacity: .35; }
+  textarea.note {
+    flex: 1; width: 100%; box-sizing: border-box; resize: none; border: 0;
+    background: rgba(255,255,255,.35); border-radius: 10px; padding: 10px;
+    outline: none; user-select: text; line-height: 1.45;
+  }
+  .hint { font-size: 12px; opacity: .6; line-height: 1.4; }
+  .checks { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+  .checks label { display: flex; align-items: center; gap: 8px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; }
+  .seg { display: flex; background: rgba(255,255,255,.4); border-radius: 8px; padding: 2px; }
+  .seg button {
+    flex: 1; border: 0; background: transparent; border-radius: 6px; padding: 5px 0; cursor: pointer;
+  }
+  .seg button.on { background: white; box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+  #menu {
+    display: none; position: absolute; z-index: 5; min-width: 132px;
+    background: rgba(246,246,246,.94); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+    border-radius: 10px; padding: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.18);
+  }
+  .mode-menu #menu { display: flex; flex-direction: column; }
+  .mode-menu #pill, .mode-menu #row { display: none; }
+  #menu button {
+    border: 0; background: transparent; text-align: left; padding: 6px 10px; border-radius: 7px; cursor: pointer;
+  }
+  #menu button:hover { background: rgba(0,0,0,.06); }
+</style>
+</head>
+<body>
+<div id="app" class="edge-right mode-rest">
+  <div id="pill"><div id="dashes"></div></div>
+  <div id="row">
+    <aside id="panel"></aside>
+    <div id="stage">
+      <div id="line"></div>
+      <div id="tabs"></div>
+      <button id="cog" title="设置"></button>
+    </div>
+  </div>
+  <div id="menu"></div>
+</div>
+<script>
+const PALETTE = {
+  "CPU":  { paper:"#BEDDFA", dash:"#2280D6", ink:"#13293A" },
+  "内存": { paper:"#B4E8D0", dash:"#0E9B6E", ink:"#0F2E23" },
+  "网络": { paper:"#FBCFA6", dash:"#E2762A", ink:"#422413" },
+  "磁盘": { paper:"#E3D3B4", dash:"#A37B3C", ink:"#372C18" },
+  "I/O":  { paper:"#C9D3DE", dash:"#4A6B8A", ink:"#18242F" },
+  "电池": { paper:"#FCE795", dash:"#E0AD08", ink:"#3A3008" },
+  "智谱": { paper:"#F7C6CE", dash:"#D8495B", ink:"#3B161C" },
+  "Java": { paper:"#CDB492", dash:"#7B4B23", ink:"#2A1A0C" },
+  "进程": { paper:"#D9C7FA", dash:"#7C4DEE", ink:"#2A1B44" },
+  "便签": { paper:"#FFE7A3", dash:"#D4920A", ink:"#3A2806" }
+};
+const ORDER = Object.keys(PALETTE);
+const GEAR = `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.7M8 12.7v1.7M1.6 8h1.7M12.7 8h1.7M3.4 3.4l1.2 1.2M11.4 11.4l1.2 1.2M12.6 3.4l-1.2 1.2M4.6 11.4l-1.2 1.2"/></svg>`;
+document.getElementById("cog").innerHTML = GEAR;
+
+let settings = { edge:"right", hoverReveals:true, alwaysShown:false, cards:ORDER.slice(), offset:16, glmKey:"", note:"" };
+let sample = null;
+let mode = "rest";
+let openKind = null;
+let hovered = null;
+let suppressed = false;
+let leaveTimer = 0;
+let dragging = false;
+let dragStartY = 0;
+let dragStartOffset = 16;
+let query = "";
+let selectedPid = null;
+let killError = "";
+let tabSig = "";
+let lastPlace = "";
+
+const app = document.getElementById("app");
+const post = (msg) => { if (window.ipc) window.ipc.postMessage(JSON.stringify(msg)); };
+
+function upright(s) {
+  return [...s].every(ch => {
+    const c = ch.codePointAt(0);
+    return (c>=0x2E80 && c<=0x9FFF) || (c>=0x3000 && c<=0x30FF) || (c>=0xF900 && c<=0xFAFF) || (c>=0xFF00 && c<=0xFFEF);
+  });
+}
+function percentText(v) { return (Number(v)||0).toFixed(1) + " %"; }
+function speedText(v) {
+  v = Number(v)||0;
+  if (v >= 1048576) return (v/1048576).toFixed(1) + "MB/s";
+  if (v >= 1024) return (v/1024).toFixed(1) + "KB/s";
+  return Math.round(v) + "B/s";
+}
+function memoryText(b) {
+  b = Number(b)||0;
+  const u = ["B","KB","MB","GB","TB"];
+  let v = b, i = 0;
+  while (v >= 1024 && i < 4) { v /= 1024; i++; }
+  if (i === 0) return Math.round(v) + " B";
+  return (v >= 10 ? v.toFixed(1) : v.toFixed(2)) + " " + u[i];
+}
+function uptimeText(sec) {
+  sec = Math.floor(sec||0);
+  const d = Math.floor(sec/86400), h = Math.floor((sec%86400)/3600), m = Math.floor((sec%3600)/60);
+  if (d > 0) return d + " 天 " + h + " 小时";
+  if (h > 0) return h + " 小时 " + m + " 分钟";
+  return m + " 分钟";
+}
+function visibleCards() {
+  const hasKey = (settings.glmKey||"").trim().length > 0;
+  const hasBat = !!(sample && sample.hasBattery);
+  return ORDER.filter(k => (settings.cards||[]).includes(k))
+    .filter(k => k !== "电池" || hasBat)
+    .filter(k => k !== "智谱" || hasKey);
+}
+function rawValue(kind) {
+  if (!sample && kind !== "便签") return "";
+  const s = sample || {}, d = s.digest || {};
+  if (kind === "CPU") return d.dominantName ? (d.dominantName + " " + Math.round(d.dominantCpu) + "%") : percentText(s.cpu);
+  if (kind === "内存") return s.memTotal ? Math.round(s.memUsed / s.memTotal * 100) + "%" : "—";
+  if (kind === "网络") return speedText(s.netIn);
+  if (kind === "磁盘") {
+    const v = (s.volumes||[])[0];
+    return v && v.total ? Math.round((1 - v.free/v.total)*100) + "%" : "—";
+  }
+  if (kind === "电池") return s.battery ? Math.round(s.battery.percent) + "%" : "—";
+  if (kind === "I/O") return speedText((s.ioRead||0) + (s.ioWrite||0));
+  if (kind === "智谱") {
+    if (s.glm && s.glm.fiveRemaining != null) return Math.round(s.glm.fiveRemaining) + "%";
+    return s.glm && s.glm.error ? "!" : "—";
+  }
+  if (kind === "Java") return d.javaCount > 0 ? memoryText(d.javaMemory) : "—";
+  if (kind === "进程") return String(d.count || 0);
+  if (kind === "便签") return String((settings.note && settings.note.length) ? 1 : 1);
+  return "";
+}
+// 悬停显示数值：只有指针下那张（以及钉住的详情卡）带数字，其余只留标题。
+function cardValue(kind) {
+  const pinned = (mode === "expanded" && openKind === kind) || (mode === "peek" && openKind === kind);
+  if (settings.hoverReveals && hovered !== kind && !pinned) return "";
+  return rawValue(kind);
+}
+const measureCtx = document.createElement("canvas").getContext("2d");
+function textWidth(text, mono) {
+  measureCtx.font = mono
+    ? "700 10.5px ui-monospace, Menlo, Consolas, monospace"
+    : "600 11.5px -apple-system, PingFang SC, sans-serif";
+  return Math.ceil(measureCtx.measureText(text).width + (mono ? 0 : text.length));
+}
+function shape(value) {
+  return (value || "").replace(/\d/g, "0");
+}
+function estimate(title, value) {
+  const q = shape(value);
+  if (title && upright(title)) {
+    const stack = 8 + [...title].length * 16;
+    return q ? stack + 6 + textWidth(q, true) : stack + 10;
+  }
+  return 18 + textWidth(q ? title + "  " + q : title, false);
+}
+function turned(html, w) {
+  return `<div class="turned" style="height:${w}px"><div class="turned-inner" style="width:${w}px">${html}</div></div>`;
+}
+function labelHTML(kind, value) {
+  const ink = PALETTE[kind].ink, dash = PALETTE[kind].dash;
+  if (upright(kind)) {
+    const chars = [...kind].map(ch => `<span style="color:${ink}">${ch}</span>`).join("");
+    const val = value
+      ? turned(`<span style="color:${dash};font-weight:700;font-size:10.5px;font-family:ui-monospace,Menlo,Consolas,monospace">${value}</span>`, Math.max(16, textWidth(value, true)))
+      : "";
+    return `<div class="stack"><div class="upright">${chars}</div>${val}</div>`;
+  }
+  const title = `<span style="color:${ink};font-weight:600;font-size:11.5px;letter-spacing:1px">${kind}</span>`;
+  const val = value
+    ? ` <span style="color:${dash};font-weight:700;font-size:10.5px;font-family:ui-monospace,Menlo,Consolas,monospace">${value}</span>`
+    : "";
+  const w = textWidth(kind, false) + (value ? 4 + textWidth(value, true) : 0);
+  return `<div class="stack">${turned(title + val, Math.max(16, w))}</div>`;
+}
+function layouts(cards, valueOf) {
+  const rest = Math.max(0, ...cards.map(k => estimate(k, "")));
+  let y = 0;
+  const items = cards.map(kind => {
+    const value = valueOf(kind);
+    const h = Math.max(estimate(kind, value), rest);
+    const item = { kind, y, h, value };
+    y += h - 6;
+    return item;
+  });
+  const total = items.length ? items[items.length - 1].y + items[items.length - 1].h : 0;
+  return { items, total };
+}
+function headerValue(kind) {
+  if (!sample) return "—";
+  const s = sample, d = s.digest || {};
+  if (kind === "CPU") return percentText(s.cpu);
+  if (kind === "内存") return s.memTotal ? Math.round(s.memUsed / s.memTotal * 100) + "%" : "—";
+  if (kind === "网络") return "↓ " + speedText(s.netIn);
+  if (kind === "磁盘") {
+    const v = (s.volumes||[])[0];
+    return v ? ("剩 " + memoryText(v.free)) : "—";
+  }
+  if (kind === "电池") return s.battery ? Math.round(s.battery.percent) + "%" : "—";
+  if (kind === "I/O") return speedText((s.ioRead||0)+(s.ioWrite||0));
+  if (kind === "智谱") return s.glm && s.glm.fiveRemaining != null ? Math.round(s.glm.fiveRemaining) + "%" : (s.glm && s.glm.error ? "!" : "—");
+  if (kind === "Java") return d.javaCount > 0 ? d.javaCount + " 个" : "—";
+  if (kind === "进程") return String(d.count||0);
+  return "1";
+}
+function panelBox() {
+  if (mode === "settings") return { w: 340, h: 520 };
+  const h = { CPU:368, "内存":366, "网络":398, "磁盘":300, "I/O":360, "电池":220, "智谱":330, Java:420, "进程":440, "便签":520 }[openKind] || 360;
+  const w = (openKind === "进程" || openKind === "便签") ? 360 : openKind === "Java" ? 560 : 264;
+  return { w, h };
+}
+const STRIP_W = 30 + 560;
+function pillHeight(cards) {
+  return 14 + cards.length * 14 + Math.max(0, cards.length - 1) * 5;
+}
+function shownCards() {
+  return (mode === "peek" && openKind) ? [openKind] : visibleCards();
+}
+// 扇形和详情共用这一扇窗口。点开面板不再改尺寸，卡片才不会被窗口拽着跳。
+function fanShell() {
+  const titles = layouts(visibleCards(), () => "");
+  const natural = Math.ceil(titles.total + 148);
+  return Math.min(760, Math.max(natural, 544, pillHeight(visibleCards())));
+}
+function contentHeight() {
+  if (mode === "rest" || mode === "menu") return pillHeight(shownCards());
+  return fanShell();
+}
+function desired() {
+  const cards = shownCards();
+  const pillH = pillHeight(cards);
+  if (mode === "menu") return { w: 168, h: 148, pin: "bottom", pillH };
+  if (mode === "rest") return { w: 14, h: pillH, pin: "bottom", pillH };
+  return { w: STRIP_W, h: fanShell(), pin: "bottom", pillH: pillHeight(visibleCards()) };
+}
+function columnMetrics() {
+  const cards = shownCards();
+  const anchor = layouts(cards, () => "");
+  const shown = layouts(cards, (kind) => cardValue(kind));
+  const viewH = window.innerHeight || contentHeight();
+  const natural = Math.ceil(anchor.total + 148);
+  // 窗口比标题列更高时，多出来的高度留在上方，列和圆点的相对位置不变。
+  // 悬停只把下面的卡片往下推，命中区用标题列，避免两个状态来回抢。
+  const top = Math.max(8, viewH - natural + 8);
+  return { cards, anchor, shown, top, block: anchor.total + 32, viewH };
+}
+function syncPlace() {
+  const g = desired();
+  const key = [g.pin, Math.round(g.w), Math.round(g.h), settings.edge, Math.round(settings.offset || 0)].join(":");
+  if (key === lastPlace) return;
+  lastPlace = key;
+  post({ cmd:"place", w:g.w, h:g.h, pin:g.pin, pillH:g.pillH });
+}
+function applyChrome() {
+  const n = shownCards().length;
+  app.style.setProperty("--pill-in", (n * 26 + 220) + "ms");
+  app.style.setProperty("--n", String(n));
+  const next = "edge-" + (settings.edge === "left" ? "left" : "right")
+    + " mode-" + mode
+    + (mode === "fan" || mode === "expanded" || mode === "peek" || mode === "closing" ? " show-line" : "");
+  if (app.className !== next) app.className = next;
+}
+function paintPill() {
+  const host = document.getElementById("dashes");
+  const cards = visibleCards();
+  host.innerHTML = cards.map(kind => {
+    const level = sample && sample.dash ? (sample.dash[dashKey(kind)] ?? 0.4) : 0.4;
+    const alert = sample && sample.attention === kind && mode === "rest";
+    const opacity = alert ? 1 : (0.32 + 0.68 * level);
+    return `<i class="dash${alert ? " alert" : ""}" style="background:${PALETTE[kind].dash};opacity:${opacity}"></i>`;
+  }).join("");
+}
+function dashKey(kind) {
+  return { CPU:"cpu", "内存":"memory", "网络":"network", "磁盘":"disk", "I/O":"io", "电池":"battery", "智谱":"glm", Java:"java", "进程":"processes", "便签":"note" }[kind];
+}
+function placePill() {
+  const pill = document.getElementById("pill");
+  const cards = shownCards();
+  const pillH = pillHeight(cards);
+  if (mode === "rest" || mode === "menu") {
+    pill.style.top = "0px";
+    pill.style.height = "100%";
+    pill.style.width = "100%";
+    return;
+  }
+  pill.style.width = "14px";
+  pill.style.height = pillH + "px";
+  pill.style.top = Math.max(0, (window.innerHeight || pillH) - pillH) + "px";
+}
+let hitSig = "";
+function publishHits(metrics) {
+  const viewW = window.innerWidth || 0;
+  const edgeLeft = settings.edge === "left";
+  const cards = metrics.anchor.items.map(item => ({
+    kind: item.kind,
+    top: metrics.top + item.y - 4,
+    bottom: metrics.top + item.y + item.h + 4,
+    left: edgeLeft ? -8 : viewW - 40,
+    right: edgeLeft ? 40 : viewW + 8
+  }));
+  const cogTop = metrics.top + metrics.shown.total + 4;
+  const cog = {
+    top: cogTop - 4, bottom: cogTop + 28,
+    left: edgeLeft ? 0 : viewW - 36,
+    right: edgeLeft ? 36 : viewW
+  };
+  let panel = null;
+  if (mode === "expanded" || mode === "settings") {
+    const box = panelBox();
+    const pTop = parseFloat(document.getElementById("panel").style.top) || metrics.top;
+    panel = {
+      top: pTop - 6, bottom: pTop + box.h + 6,
+      left: edgeLeft ? 24 : viewW - 36 - box.w,
+      right: edgeLeft ? 36 + box.w : viewW - 24
+    };
+  }
+  const sig = JSON.stringify({ cards, cog, panel });
+  if (sig === hitSig) return;
+  hitSig = sig;
+  post({ cmd: "hits", cards, cog, panel });
+}
+// 跟 macOS 同一套弹簧：临界阻尼，response 就是落到终点的时间，中途改方向从当前位置折返。
+const STAGE_MS = 26;
+const TRAVEL = 54;
+const STAGE_RESPONSE = 0.22;
+const LAYOUT_RESPONSE = 0.3;
+const PANEL_RESPONSE = 0.28;
+const motion = {
+  running: false,
+  last: 0,
+  edge: "",
+  lineTop: 8,
+  slides: new Map(),
+  layout: new Map(),
+  cogY: null,
+  panel: { pos: 0, vel: 0, target: 0 },
+  geom: null
+};
+function approach(pos, vel, target, dt, response, eps, veps) {
+  const err = pos - target;
+  if (Math.abs(err) < eps && Math.abs(vel) < veps) return [target, 0];
+  const w = (2 * Math.PI) / response;
+  const b = vel + w * err;
+  const e = Math.exp(-w * dt);
+  const span = err + b * dt;
+  return [target + span * e, (b - w * span) * e];
+}
+function approachUnit(pos, vel, target, dt, response) {
+  return approach(pos, vel, target, dt, response, 0.0015, 0.02);
+}
+function approachPx(pos, vel, target, dt, response) {
+  return approach(pos, vel, target, dt, response, 0.15, 0.8);
+}
+function kick() {
+  if (motion.running) return;
+  motion.running = true;
+  motion.last = performance.now();
+  requestAnimationFrame(tick);
+}
+function tick(now) {
+  if (!motion.running) return;
+  const dt = Math.min(0.034, Math.max(0.001, (now - motion.last) / 1000));
+  motion.last = now;
+  let busy = false;
+  for (const s of motion.slides.values()) {
+    if (now >= s.arm && s.target !== s.want) s.target = s.want;
+    [s.pos, s.vel] = approachUnit(s.pos, s.vel, s.target, dt, STAGE_RESPONSE);
+    if (now < s.arm || s.target !== s.want || s.pos !== s.want || s.vel !== 0) busy = true;
+  }
+  for (const s of motion.layout.values()) {
+    [s.y, s.yv] = approachPx(s.y, s.yv, s.ty, dt, LAYOUT_RESPONSE);
+    [s.h, s.hv] = approachPx(s.h, s.hv, s.th, dt, LAYOUT_RESPONSE);
+    if (s.y !== s.ty || s.h !== s.th) busy = true;
+  }
+  if (motion.cogY) {
+    const c = motion.cogY;
+    [c.y, c.vy] = approachPx(c.y, c.vy, c.ty, dt, LAYOUT_RESPONSE);
+    if (c.y !== c.ty) busy = true;
+  }
+  const p = motion.panel;
+  [p.pos, p.vel] = approachUnit(p.pos, p.vel, p.target, dt, PANEL_RESPONSE);
+  if (p.pos !== p.target || p.vel !== 0) busy = true;
+  if (motion.geom) {
+    const g = motion.geom;
+    [g.y, g.vy] = approachPx(g.y, g.vy, g.ty, dt, PANEL_RESPONSE);
+    [g.w, g.vw] = approachPx(g.w, g.vw, g.tw, dt, PANEL_RESPONSE);
+    [g.h, g.vh] = approachPx(g.h, g.vh, g.th, dt, PANEL_RESPONSE);
+    if (g.y !== g.ty || g.w !== g.tw || g.h !== g.th) busy = true;
+  }
+  applyMotion();
+  if (busy) requestAnimationFrame(tick);
+  else motion.running = false;
+}
+function armSlide(key, revealed, order, now) {
+  const want = revealed ? 1 : 0;
+  let s = motion.slides.get(key);
+  if (!s) {
+    s = { pos: 0, vel: 0, target: 0, want: 0, arm: 0 };
+    motion.slides.set(key, s);
+  }
+  if (s.want === want) return s.pos !== want || s.vel !== 0 || now < s.arm;
+  s.want = want;
+  // 延迟到点才改目标。没开始的那张保持原样，已经在路上的继续走到延迟结束再折返。
+  s.arm = now + order * STAGE_MS;
+  return true;
+}
+function syncStage() {
+  if (mode === "rest" || mode === "menu") return;
+  const revealed = mode !== "closing";
+  const cards = shownCards();
+  const total = cards.length + 1;
+  const now = performance.now();
+  const live = new Set(cards);
+  live.add("__cog");
+  for (const key of motion.slides.keys()) if (!live.has(key)) motion.slides.delete(key);
+  for (const key of motion.layout.keys()) if (!live.has(key)) motion.layout.delete(key);
+  let busy = false;
+  cards.forEach((kind, index) => {
+    const order = revealed ? index : Math.max(0, total - 1 - index);
+    if (armSlide(kind, revealed, order, now)) busy = true;
+  });
+  if (armSlide("__cog", revealed, revealed ? cards.length : 0, now)) busy = true;
+  if (busy) kick();
+}
+function trackLayout(kind, y, h) {
+  let s = motion.layout.get(kind);
+  if (!s) {
+    motion.layout.set(kind, { y, h, yv: 0, hv: 0, ty: y, th: h });
+    return;
+  }
+  if (Math.abs(s.ty - y) <= 0.5 && Math.abs(s.th - h) <= 0.5) return;
+  s.ty = y;
+  s.th = h;
+  kick();
+}
+function trackCog(y) {
+  if (!motion.cogY) {
+    motion.cogY = { y, vy: 0, ty: y };
+    return;
+  }
+  if (Math.abs(motion.cogY.ty - y) <= 0.5) return;
+  motion.cogY.ty = y;
+  kick();
+}
+function syncPanel() {
+  const show = mode === "expanded" || mode === "settings";
+  const target = show ? 1 : 0;
+  if (motion.panel.target === target && motion.panel.pos === target && motion.panel.vel === 0) return;
+  motion.panel.target = target;
+  kick();
+}
+function trackGeom(y, w, h) {
+  const g = motion.geom;
+  if (!g) {
+    motion.geom = { y, w, h, vy: 0, vw: 0, vh: 0, ty: y, tw: w, th: h };
+    return;
+  }
+  // 面板还没露出来时直接用新尺寸，避免从上一张的大小飞过来。
+  if (motion.panel.pos < 0.08) {
+    g.y = g.ty = y; g.w = g.tw = w; g.h = g.th = h;
+    g.vy = g.vw = g.vh = 0;
+    return;
+  }
+  if (Math.abs(g.ty - y) <= 0.5 && Math.abs(g.tw - w) <= 0.5 && Math.abs(g.th - h) <= 0.5) return;
+  g.ty = y; g.tw = w; g.th = h;
+  kick();
+}
+function px(v) {
+  return (Math.round(v * 100) / 100) + "px";
+}
+function unitText(v) {
+  if (v >= 0.999) return "1";
+  if (v <= 0.001) return "0";
+  return v.toFixed(3);
+}
+function applyMotion() {
+  const dir = settings.edge === "left" ? -1 : 1;
+  const rot = dir < 0 ? 3 : -3;
+  const host = document.getElementById("tabs");
+  if (host) {
+    host.querySelectorAll(".tab").forEach((btn) => {
+      const slide = motion.slides.get(btn.dataset.kind);
+      const lay = motion.layout.get(btn.dataset.kind);
+      if (!slide || !lay) return;
+      const dx = dir * (1 - slide.pos) * TRAVEL;
+      const dy = lay.y - lay.ty;
+      btn.style.top = px(lay.ty);
+      btn.style.height = px(Math.max(1, lay.h));
+      btn.style.opacity = unitText(slide.pos);
+      btn.style.transform = `translate3d(${dx.toFixed(2)}px,${dy.toFixed(2)}px,0) rotate(${rot}deg)`;
+    });
+  }
+  const cog = document.getElementById("cog");
+  const cogSlide = motion.slides.get("__cog");
+  if (cog && cogSlide && motion.cogY) {
+    const dx = dir * (1 - cogSlide.pos) * TRAVEL;
+    const dy = motion.cogY.y - motion.cogY.ty;
+    cog.style.top = px(motion.cogY.ty);
+    cog.style.opacity = unitText(cogSlide.pos);
+    cog.style.transform = `translate3d(${dx.toFixed(2)}px,${dy.toFixed(2)}px,0)`;
+  }
+  const line = document.getElementById("line");
+  if (line) {
+    const cards = shownCards();
+    const lead = cards.length ? motion.slides.get(cards[0]) : null;
+    line.style.top = px(motion.lineTop);
+    line.style.opacity = lead ? unitText(lead.pos) : "0";
+    if (motion.cogY) line.style.height = px(Math.max(0, motion.cogY.y - motion.lineTop + 42));
+  }
+  applyPanel();
+}
+function applyPanel() {
+  const panel = document.getElementById("panel");
+  if (!panel) return;
+  const p = motion.panel;
+  const show = mode === "expanded" || mode === "settings";
+  if (p.pos <= 0.001 && !show) {
+    panel.style.display = "none";
+    if (panel.innerHTML) {
+      panel.innerHTML = "";
+      panel.dataset.kind = "";
+      panelPlaceKey = "";
+    }
+    return;
+  }
+  const dir = settings.edge === "left" ? -1 : 1;
+  const x = dir * (1 - p.pos) * 24;
+  const scale = 0.97 + 0.03 * p.pos;
+  panel.style.display = "flex";
+  panel.style.opacity = unitText(p.pos);
+  panel.style.transform = `translate3d(${x.toFixed(2)}px,0,0) scale(${scale.toFixed(4)})`;
+  panel.style.transformOrigin = dir > 0 ? "right center" : "left center";
+  panel.style.pointerEvents = p.pos > 0.65 ? "auto" : "none";
+  const g = motion.geom;
+  if (g) {
+    panel.style.top = px(g.y);
+    panel.style.width = px(g.w);
+    panel.style.height = px(g.h);
+  }
+}
+function paintTabs() {
+  const metrics = columnMetrics();
+  const lay = metrics.shown;
+  const sig = settings.edge + "|" + metrics.cards.join(",");
+  const host = document.getElementById("tabs");
+  const fresh = sig !== tabSig;
+  if (fresh && motion.edge !== settings.edge) {
+    motion.slides.clear();
+    motion.edge = settings.edge;
+  }
+  syncStage();
+  if (fresh) {
+    tabSig = sig;
+    host.innerHTML = lay.items.map((item, index) => {
+      const p = PALETTE[item.kind];
+      return `<button class="tab${openKind===item.kind?" open":""}" data-kind="${item.kind}" style="z-index:${index+1}" title="${item.kind}"><div class="paper" style="background:${p.paper}">${labelHTML(item.kind, item.value)}</div></button>`;
+    }).join("");
+  }
+  lay.items.forEach((item, index) => {
+    const btn = host.querySelector(`[data-kind="${item.kind}"]`);
+    if (!btn) return;
+    btn.style.zIndex = String(index + 1);
+    btn.classList.toggle("open", openKind === item.kind);
+    const paper = btn.querySelector(".paper");
+    const html = labelHTML(item.kind, item.value);
+    if (paper && paper._label !== html) {
+      paper.innerHTML = html;
+      paper._label = html;
+    }
+    trackLayout(item.kind, metrics.top + item.y, item.h);
+  });
+  trackCog(metrics.top + lay.total + 4);
+  motion.lineTop = metrics.top;
+  applyMotion();
+  publishHits(metrics);
+  return metrics;
+}
+function icon(kind) {
+  const paths = {
+    CPU: "M3 6h10v8H3zM6 6V3M10 6V3M6 17v-3M10 17v-3M3 9H1M3 12H1M15 9h2M15 12h2",
+    "内存": "M2 6h12v7H2zM4 6V4h2M8 6V4h2M12 6V4",
+    "网络": "M8 14v-2M4 8a6 6 0 0 1 8 0M6 10a3 3 0 0 1 4 0",
+    "磁盘": "M3 5h10v8H3zM3 8h10",
+    "I/O": "M5 4v8M3 6l2-2 2 2M11 14V6M9 12l2 2 2-2",
+    "电池": "M3 6h9v6H3zM12 8h2v2h-2",
+    "智谱": "M8 2l1.2 4.2L13 8l-3.8 1.2L8 14l-1.2-4.8L3 8l3.8-1.8z",
+    Java: "M8 3c2 3 2 4 0 7-2-1-2-3 0-4 1 2 1 3 0 4",
+    "进程": "M3 4h10M3 8h10M3 12h10",
+    "便签": "M4 2h7l3 3v9H4zM11 2v3h3"
+  };
+  return `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">${paths[kind]||""}</svg>`;
+}
+function rows(list, ink) {
+  return `<div class="rows">${list.map(([k,v]) => `<div class="rowline" style="color:${ink}"><span>${k}</span><span>${v}</span></div>`).join("")}</div>`;
+}
+function chartCard(id) { return `<div class="chart"><canvas id="${id}"></canvas></div>`; }
+let panelPlaceKey = "";
+function pinPanel(panel) {
+  const box = panelBox();
+  const metrics = columnMetrics();
+  const viewH = metrics.viewH;
+  const mid = metrics.top + metrics.anchor.total / 2;
+  const y = Math.max(8, Math.min(mid - box.h / 2, Math.max(8, viewH - box.h - 8)));
+  const key = [mode, openKind || "", settings.edge, metrics.cards.join(","), Math.round(viewH), box.w, box.h, Math.round(metrics.top)].join("|");
+  if (key === panelPlaceKey && motion.geom) return;
+  panelPlaceKey = key;
+  trackGeom(y, box.w, box.h);
+  applyPanel();
+}
+function paintPanel() {
+  const panel = document.getElementById("panel");
+  syncPanel();
+  if (mode !== "expanded" && mode !== "settings") {
+    applyPanel();
+    return;
+  }
+  if (mode === "settings") { paintSettings(panel); return; }
+  const kind = openKind;
+  const p = PALETTE[kind];
+  pinPanel(panel);
+  panel.style.background = p.paper;
+  panel.style.color = p.ink;
+  const body = panelBody(kind, p);
+  const focused = document.activeElement && panel.contains(document.activeElement) && document.activeElement.classList.contains("note");
+  if (focused) return;
+  panel.innerHTML = `
+    <div class="head">
+      <div class="badge" style="color:${p.dash}">${icon(kind)}</div>
+      <div class="title">${kind}</div>
+      <div class="head-val" style="color:${p.dash}">${headerValue(kind)}</div>
+      <button class="x" id="close" title="关闭">${xIcon(p.ink)}</button>
+    </div>${body}`;
+  drawCharts();
+  const close = document.getElementById("close");
+  if (close) close.onclick = () => setMode("fan");
+  bindPanel();
+  publishHits(columnMetrics());
+}
+function xIcon(ink) {
+  return `<svg width="15" height="15" viewBox="0 0 15 15"><circle cx="7.5" cy="7.5" r="7" fill="${ink}" opacity=".35"/><path d="M5 5l5 5M10 5l-5 5" stroke="#fff" stroke-width="1.3"/></svg>`;
+}
+function panelBody(kind, p) {
+  const s = sample || {};
+  const d = s.digest || {};
+  if (kind === "CPU") {
+    const list = [];
+    if (d.dominantName) list.push(["当前最忙", d.dominantName + " " + percentText(d.dominantCpu)]);
+    list.push(["占用", percentText(s.cpu)]);
+    list.push(["负载(1 分钟)", (s.load1||0).toFixed(2)]);
+    list.push(["核心 / 已运行", (s.cores||0) + " · " + uptimeText(s.uptimeSec)]);
+    return chartCard("c0") + `<div class="cap">负载构成</div>` + rows(list, p.ink) + (s.peak ? `<div class="hint">${s.peak}</div>` : "");
+  }
+  if (kind === "内存") {
+    const list = [
+      ["已用", memoryText(s.memUsed)],
+      ["可用", memoryText(s.memAvail)],
+      ["空闲", memoryText(s.memFree)],
+      ["交换", memoryText(s.swapUsed) + " / " + memoryText(s.swapTotal)]
+    ];
+    return chartCard("c0") + `<div class="cap">构成</div>` + rows(list, p.ink);
+  }
+  if (kind === "网络") {
+    const ips = (s.ips||[]).slice(0, 3).map(a => [a.name, a.ip]);
+    const list = [["下载", "↓ " + speedText(s.netIn)], ["上传", "↑ " + speedText(s.netOut)], ["本机 IP", (s.ips&&s.ips[0]) ? s.ips[0].ip : "未连接"], ...ips];
+    return chartCard("c0") + `<div class="cap">速率与地址</div>` + rows(list, p.ink);
+  }
+  if (kind === "磁盘") {
+    const v = (s.volumes||[])[0];
+    if (!v) return `<div class="hint">未读取到卷信息</div>`;
+    const frac = v.total ? (1 - v.free/v.total) : 0;
+    const others = (s.volumes||[]).slice(1).map(o => [o.name || o.mount, "剩 " + memoryText(o.free) + " / " + memoryText(o.total)]);
+    return `<div class="gauge"><i style="width:${Math.round(frac*100)}%;background:${frac>0.9?"#e24b4b":p.dash}"></i></div>
+      <div class="hint">${v.name || v.mount} · 已用 ${memoryText(v.total-v.free)} / ${memoryText(v.total)}</div>`
+      + (others.length ? `<div class="cap">其他卷</div>` + rows(others, p.ink) : "");
+  }
+  if (kind === "I/O") {
+    const list = [
+      ["读取", "↓ " + speedText(s.ioRead)],
+      ["写入", "↑ " + speedText(s.ioWrite)],
+      ["累计读取", memoryText(s.ioReadTotal)],
+      ["累计写入", memoryText(s.ioWriteTotal)]
+    ];
+    return chartCard("c0") + `<div class="cap">速率与累计</div>` + rows(list, p.ink);
+  }
+  if (kind === "电池") {
+    if (!s.battery) return `<div class="hint">未检测到电池</div>`;
+    const b = s.battery;
+    const tint = b.charging || b.percent >= 40 ? "#2f9e44" : b.percent >= 20 ? "#e08a00" : "#e24b4b";
+    const state = b.charging ? "充电中" : (b.onAc ? "已接电源" : "使用电池");
+    const time = b.minutes != null ? (b.charging ? "充满约 " : "剩余约 ") + b.minutes + " 分钟" : "";
+    return `<div class="gauge"><i style="width:${Math.round(b.percent)}%;background:${tint}"></i></div>
+      <div class="hint">${state}${time ? " · " + time : ""}</div>`;
+  }
+  if (kind === "智谱") {
+    if (!s.glm) return `<div class="hint">未设置 API Key</div>`;
+    if (s.glm.error && !(s.glm.windows||[]).length) return `<div class="hint">${s.glm.error}</div>`;
+    const list = (s.glm.windows||[]).map(w => [w.label, Math.round(w.remaining) + "%" + (w.extra ? " · " + w.extra : "")]);
+    return (s.glm.level ? `<div class="hint">档位 ${s.glm.level}</div>` : "") + rows(list, p.ink);
+  }
+  if (kind === "Java" || kind === "进程") return processTable(kind, p);
+  if (kind === "便签") return `<textarea class="note" placeholder="写点什么…">${escapeHtml(settings.note||"")}</textarea>`;
+  return "";
+}
+function escapeHtml(s) { return s.replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+function processTable(kind, p) {
+  const all = (sample && sample.processes) || [];
+  const list = kind === "Java" ? all.filter(r => r.java) : all;
+  const q = query.trim().toLowerCase();
+  const shown = list.filter(r => !q || (r.displayName||"").toLowerCase().includes(q) || String(r.pid).includes(q) || (r.user||"").toLowerCase().includes(q))
+    .sort((a,b) => b.cpu - a.cpu).slice(0, 80);
+  const summary = kind === "Java"
+    ? `${list.length} 个 JVM · 合计内存 ${memoryText(list.reduce((s,r)=>s+r.memory,0))} · CPU ${percentText(list.reduce((s,r)=>s+r.cpu,0))}`
+    : `${list.length} 个进程`;
+  return `<div style="display:flex;gap:8px;align-items:center">
+      <input class="search" placeholder="搜索名称、PID、用户" value="${escapeHtml(query)}">
+      <button class="kill" ${selectedPid==null?"disabled":""}>强制退出</button>
+    </div>
+    <div class="hint">${summary}${killError ? " · " + killError : ""}</div>
+    <div class="plist">
+      <div class="prow headrow"><span>进程</span><span>PID</span><span>CPU</span><span>内存</span></div>
+      ${shown.map(r => `<div class="prow${selectedPid===r.pid?" on":""}" data-pid="${r.pid}"><b>${escapeHtml(r.displayName||r.name)}</b><span>${r.pid}</span><span>${percentText(r.cpu)}</span><span>${memoryText(r.memory)}</span></div>`).join("")}
+    </div>`;
+}
+function bindPanel() {
+  const search = document.querySelector(".search");
+  if (search) {
+    search.oninput = (e) => { query = e.target.value; paintPanel(); const again = document.querySelector(".search"); if (again) { again.focus(); again.setSelectionRange(query.length, query.length); } };
+  }
+  document.querySelectorAll(".prow[data-pid]").forEach(el => {
+    el.onclick = () => { selectedPid = Number(el.dataset.pid); paintPanel(); };
+  });
+  const kill = document.querySelector(".kill");
+  if (kill) kill.onclick = () => { if (selectedPid != null) post({ cmd:"kill", pid: selectedPid }); };
+  const note = document.querySelector("textarea.note");
+  if (note) note.oninput = () => {
+    settings.note = note.value;
+    clearTimeout(note._t);
+    note._t = setTimeout(() => post({ cmd:"note", note: settings.note }), 400);
+  };
+}
+function paintSettings(panel) {
+  pinPanel(panel);
+  panel.style.background = "rgba(246,246,246,.94)";
+  panel.style.color = "#1d1d1f";
+  const cards = ORDER.map(kind => {
+    const on = (settings.cards||[]).includes(kind);
+    const disabled = (kind === "电池" && !(sample && sample.hasBattery)) || (kind === "智谱" && !(settings.glmKey||"").trim());
+    const extra = kind === "电池" && disabled ? "（未检测到电池）" : kind === "智谱" && !(settings.glmKey||"").trim() ? "（未设置 API Key）" : "";
+    return `<label><input type="checkbox" data-card="${kind}" ${on?"checked":""} ${disabled?"disabled":""}><i class="swatch" style="background:${PALETTE[kind].dash}"></i>${kind}${extra}</label>`;
+  }).join("");
+  const edgeBtn = (id, label) => `<button data-edge="${id}" class="${settings.edge===id?"on":""}">${label}</button>`;
+  panel.innerHTML = `
+    <div class="head"><div class="title" style="opacity:1">设置</div><button class="x" id="close">${xIcon("#1d1d1f")}</button></div>
+    <div class="cap">显示哪些卡</div>
+    <div class="checks">${cards}</div>
+    <label class="checks"><input type="checkbox" id="always" ${settings.alwaysShown?"checked":""}>永久展开卡片</label>
+    <label class="checks"><input type="checkbox" id="hover" ${settings.hoverReveals?"checked":""}>悬停显示数值</label>
+    <div class="cap">停靠边缘</div>
+    <div class="seg">${edgeBtn("left","左缘")}${edgeBtn("right","右缘")}</div>
+    <div class="hint">鼠标划到屏幕边缘展开卡片，点击卡片查看详情。左右缘可以按住小圆点上下拖。至少保留一张卡。</div>
+    <div class="cap">智谱 API Key</div>
+    <input class="search" id="glm" type="password" placeholder="粘贴 bigmodel.cn 的 API Key" value="${escapeHtml(settings.glmKey||"")}">
+    <div class="hint">保存在本机配置里。留空则不显示智谱卡。声音律动这版先不采集系统播放。</div>
+    <button class="kill" id="quit" style="align-self:flex-start;background:#444">退出 SysMon</button>`;
+  document.getElementById("close").onclick = () => setMode(settings.alwaysShown ? "fan" : "fan");
+  panel.querySelectorAll("[data-card]").forEach(box => box.onchange = () => {
+    const kind = box.dataset.card;
+    const set = new Set(settings.cards);
+    if (box.checked) set.add(kind); else if (set.size > 1) set.delete(kind); else box.checked = true;
+    settings.cards = ORDER.filter(k => set.has(k));
+    saveSettings();
+  });
+  document.getElementById("always").onchange = (e) => { settings.alwaysShown = e.target.checked; saveSettings(); if (settings.alwaysShown) setMode("fan"); };
+  document.getElementById("hover").onchange = (e) => { settings.hoverReveals = e.target.checked; saveSettings(); paint(); };
+  panel.querySelectorAll("[data-edge]").forEach(btn => btn.onclick = () => { settings.edge = btn.dataset.edge; saveSettings(); paint(); });
+  const glm = document.getElementById("glm");
+  glm.oninput = () => { settings.glmKey = glm.value; clearTimeout(glm._t); glm._t = setTimeout(saveSettings, 500); };
+  document.getElementById("quit").onclick = () => post({ cmd:"quit" });
+  publishHits(columnMetrics());
+}
+function saveSettings() {
+  post({ cmd:"settings", settings });
+  tabSig = "";
+  paint();
+}
+function drawCharts() {
+  if (!sample || !openKind) return;
+  const canvas = document.getElementById("c0");
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 220, h = 60;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const c = canvas.getContext("2d");
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, w, h);
+  const p = PALETTE[openKind];
+  if (openKind === "CPU") area(c, sample.cpuHist, w, h, p.dash, 100, ["0%","50%","100%"]);
+  else if (openKind === "内存") {
+    const total = (sample.memTotal || 1) / 1073741824;
+    area(c, sample.memHist, w, h, p.dash, total, ["0", total.toFixed(0)+"G"]);
+  } else if (openKind === "网络") duo(c, sample.netDownHist, sample.netUpHist, w, h, p.dash, hexFade(p.ink, .55));
+  else if (openKind === "I/O") duo(c, sample.ioReadHist, sample.ioWriteHist, w, h, p.dash, hexFade(p.ink, .55));
+}
+function area(c, data, w, h, color, max, labels) {
+  data = data && data.length ? data : [0];
+  c.strokeStyle = hexFade("#000", .08);
+  c.font = "10px sans-serif";
+  c.fillStyle = hexFade("#000", .35);
+  [0, .5, 1].forEach((t, i) => {
+    const y = h - t * (h - 12) - 2;
+    c.beginPath(); c.moveTo(28, y); c.lineTo(w, y); c.stroke();
+    if (labels[i] || labels[Math.min(i, labels.length-1)]) c.fillText(labels[i] || "", 0, y + 3);
+  });
+  stroke(c, data, w, h, color, max, false, 28);
+  const g = c.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, hexFade(color, .28));
+  g.addColorStop(1, hexFade(color, .02));
+  c.fillStyle = g;
+  fillUnder(c, data, w, h, max, 28);
+}
+function duo(c, down, up, w, h, a, b) {
+  const both = (down||[]).concat(up||[]);
+  const max = Math.max(1, ...both);
+  stroke(c, down||[], w, h, a, max, false, 0);
+  stroke(c, up||[], w, h, b, max, true, 0);
+}
+function stroke(c, data, w, h, color, max, dashed, left) {
+  if (!data.length) return;
+  c.beginPath();
+  c.strokeStyle = color;
+  c.lineWidth = 1.5;
+  c.setLineDash(dashed ? [3, 3] : []);
+  data.forEach((v, i) => {
+    const x = left + (data.length === 1 ? 0 : (i / (data.length - 1)) * (w - left));
+    const y = h - (Math.max(0, v) / max) * (h - 8) - 2;
+    if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+  });
+  c.stroke();
+  c.setLineDash([]);
+}
+function fillUnder(c, data, w, h, max, left) {
+  if (!data.length) return;
+  c.beginPath();
+  data.forEach((v, i) => {
+    const x = left + (data.length === 1 ? 0 : (i / (data.length - 1)) * (w - left));
+    const y = h - (Math.max(0, v) / max) * (h - 8) - 2;
+    if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+  });
+  c.lineTo(w, h); c.lineTo(left, h); c.closePath(); c.fill();
+}
+function hexFade(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`;
+}
+function setMode(next, kind) {
+  const fromSmall = mode === "rest" || mode === "menu";
+  if (kind !== undefined) openKind = kind;
+  if (next === "fan") openKind = null;
+  mode = next;
+  if (next === "peek") openKind = kind || openKind;
+  if (fromSmall && next !== "rest" && next !== "menu") {
+    window._layoutWhenTall = true;
+    tabSig = "";
+  }
+  const watch = next === "expanded" && (openKind === "进程" || openKind === "Java");
+  post({ cmd:"watch", watch });
+  post({ cmd:"mode", mode });
+  applyChrome();
+  paint();
+}
+window.forceFan = function () {
+  if (mode === "expanded" || mode === "settings") return;
+  if (mode === "closing") {
+    clearTimeout(window._closeTimer);
+    mode = "fan";
+    hitSig = "";
+    post({ cmd:"mode", mode: "fan" });
+    window._layoutWhenTall = (window.innerWidth || 0) < 40;
+    paint();
+    return;
+  }
+  if (mode === "fan") return;
+  if (mode === "peek") {
+    mode = "fan";
+    openKind = null;
+    tabSig = "";
+    hitSig = "";
+    post({ cmd:"mode", mode: "fan" });
+    paint();
+    return;
+  }
+  mode = "fan";
+  tabSig = "";
+  hitSig = "";
+  post({ cmd:"mode", mode: "fan" });
+  window._layoutWhenTall = true;
+  paint();
+};
+window.forceRest = function () {
+  if (dragging || settings.alwaysShown) return;
+  if (mode !== "fan" && mode !== "peek") return;
+  mode = "closing";
+  post({ cmd:"mode", mode: "closing" });
+  applyChrome();
+  syncStage();
+  const wait = shownCards().length * 26 + 220;
+  clearTimeout(window._closeTimer);
+  window._closeTimer = setTimeout(() => {
+    if (mode !== "closing") return;
+    mode = "rest";
+    openKind = null;
+    hovered = null;
+    tabSig = "";
+    hitSig = "";
+    post({ cmd:"mode", mode: "rest" });
+    paint();
+  }, wait);
+};
+window.setHover = function (kind) {
+  const next = kind || null;
+  if (hovered === next) return;
+  hovered = next;
+  if (mode === "rest" || mode === "menu" || mode === "closing") return;
+  paintTabs();
+};
+function paint() {
+  applyChrome();
+  paintPill();
+  placePill();
+  paintMenu();
+  syncPlace();
+  if (mode === "rest" || mode === "menu") return;
+  if (Math.abs((window.innerHeight || 0) - contentHeight()) > 40) return;
+  paintTabs();
+  paintPanel();
+  placePill();
+}
+function paintMenu() {
+  const menu = document.getElementById("menu");
+  menu.innerHTML = `
+    <button data-edge="left">停靠左缘</button>
+    <button data-edge="right">停靠右缘</button>
+    <button data-set="1">设置</button>
+    <button data-quit="1">退出</button>`;
+  menu.querySelectorAll("[data-edge]").forEach(btn => btn.onclick = () => {
+    settings.edge = btn.dataset.edge; saveSettings(); setMode("rest");
+  });
+  menu.querySelector("[data-set]").onclick = () => setMode("settings");
+  menu.querySelector("[data-quit]").onclick = () => post({ cmd:"quit" });
+}
+function goFan() {
+  clearTimeout(leaveTimer);
+  if (mode === "peek") suppressed = true;
+  if (mode === "rest" || mode === "peek" || mode === "menu" || mode === "closing") setMode("fan");
+}
+document.getElementById("tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest(".tab");
+  if (!btn) return;
+  const kind = btn.dataset.kind;
+  if (mode === "expanded" && openKind === kind) setMode("fan");
+  else setMode("expanded", kind);
+});
+document.getElementById("cog").onclick = () => setMode("settings");
+document.getElementById("pill").addEventListener("pointerdown", armDrag);
+document.getElementById("stage").addEventListener("pointerdown", (e) => {
+  if (e.target.closest("#panel") || e.target.closest("#cog")) return;
+  armDrag(e);
+});
+let arm = null;
+function armDrag(e) {
+  if (e.button !== 0) return;
+  arm = { y: e.screenY, offset: settings.offset || 16 };
+}
+window.addEventListener("pointermove", (e) => {
+  if (!arm) return;
+  if (Math.abs(e.screenY - arm.y) < 4) return;
+  dragging = true;
+  const next = Math.max(0, arm.offset + (arm.y - e.screenY));
+  settings.offset = next;
+  post({ cmd:"offset", offset: next });
+  if (mode === "rest" || mode === "menu") syncPlace();
+  else { paintTabs(); placePill(); }
+});
+window.addEventListener("pointerup", () => { arm = null; setTimeout(() => { dragging = false; }, 0); });
+window.addEventListener("resize", () => {
+  if (mode === "rest" || mode === "menu") return;
+  window._layoutWhenTall = false;
+  paintTabs();
+  placePill();
+  if (mode === "expanded" || mode === "settings") paintPanel();
+});
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && (mode === "expanded" || mode === "settings" || mode === "menu")) setMode(settings.alwaysShown ? "fan" : "fan");
+});
+window.onSettings = (next) => {
+  settings = Object.assign(settings, next || {});
+  if (settings.edge !== "left" && settings.edge !== "right") settings.edge = "right";
+  tabSig = "";
+  if (settings.alwaysShown && mode === "rest") mode = "fan";
+  paint();
+};
+window.onSample = (next) => {
+  sample = next;
+  if (sample && sample.attention == null) suppressed = false;
+  if (mode === "peek") {
+    mode = "rest";
+    openKind = null;
+    tabSig = "";
+    post({ cmd:"mode", mode: "rest" });
+  } else if (mode === "rest" && settings.alwaysShown) {
+    mode = "fan";
+  }
+  paint();
+};
+window.onKill = (ok) => { killError = ok ? "" : "结束进程失败"; paintPanel(); };
+paint();
+post({ cmd:"ready" });
+</script>
+</body>
+</html>

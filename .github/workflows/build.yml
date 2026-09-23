@@ -29,12 +29,12 @@ jobs:
 
       - name: Verify the bundle
         run: |
-          test -x build/SysMon.app/Contents/MacOS/SysMon
-          lipo -info build/SysMon.app/Contents/MacOS/SysMon | grep -Eq 'arm64.*x86_64|x86_64.*arm64'
-          codesign --verify --deep --strict build/SysMon.app
-          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" build/SysMon.app/Contents/Info.plist
+          test -x mac/build/SysMon.app/Contents/MacOS/SysMon
+          lipo -info mac/build/SysMon.app/Contents/MacOS/SysMon | grep -Eq 'arm64.*x86_64|x86_64.*arm64'
+          codesign --verify --deep --strict mac/build/SysMon.app
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" mac/build/SysMon.app/Contents/Info.plist
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: SysMon-app
-          path: build/SysMon.app
+          path: mac/build/SysMon.app
