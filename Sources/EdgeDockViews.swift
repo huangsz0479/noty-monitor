@@ -39,9 +39,6 @@ extension DockPanelKind {
 struct EdgeDockRootView: View {
     @ObservedObject var dock: EdgeDockModel
     unowned let controller: EdgeDockController
-    @ObservedObject var store = MonitorStore.shared
-    @ObservedObject var settings = CardSettings.shared
-    @ObservedObject var notes = NoteStore.shared
 
     private var edge: DockEdge { dock.edge }
     /// 卡片收回途中先别亮;等到最后一张基本到位再亮。展开时必须灭掉。
@@ -69,30 +66,18 @@ struct EdgeDockRootView: View {
             ZStack(alignment: rootAlignment) {
 
                 if dock.state != .rest {
-                    MetricFanColumn(dock: dock, controller: controller, store: store)
-                        .transition(.identity)
-                        .padding(fanPadding(panelHeight: h, panelWidth: w))
+                    // 展开层才订整份采样。收起时这层不在树上,曲线追加不会带动小圆点。
+                    EdgeDockLiveLayer(dock: dock, controller: controller,
+                                      panelHeight: h)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: rootAlignment)
                 }
 
-                MonitorPillView(store: store, edge: edge)
+                MonitorPillView(edge: edge)
                     .padding(pillPadding(panelHeight: h, panelWidth: w))
                     .transaction { $0.animation = nil }
                     .opacity(pillShown ? 1 : 0)
                     // 展开时立刻灭掉。淡出要 0.12s,第一张卡已经从圆点上冒出来,看起来就是闪。
                     .animation(pillShown ? .easeOut(duration: 0.1) : nil, value: pillShown)
-
-                // 最后声明,盖住卡片列,贴屏幕边缘。
-                if let kind = dock.state.expandedKind {
-                    MetricPanelView(kind: kind, store: store, edge: edge,
-                                    stripReserve: dock.bottomClearance,
-                                    onClose: {
-                                        if controller.consumeDragClick() { return }
-                                        controller.collapse()
-                                    })
-                        .padding(panelPadding(kind: kind, panelHeight: h, panelWidth: w))
-                        .transition(.modifier(active: PanelPull(hidden: true, edge: edge),
-                                               identity: PanelPull(hidden: false, edge: edge)))
-                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: rootAlignment)
         }
@@ -125,39 +110,56 @@ struct EdgeDockRootView: View {
         }
     }
 
-    private func fanPadding(panelHeight ph: CGFloat, panelWidth pw: CGFloat) -> EdgeInsets {
-        switch edge {
-        case .right, .left:
-            return EdgeInsets(top: fanTop(panelHeight: ph), leading: 0, bottom: 0, trailing: 0)
-        case .bottomRight:
-            // 卡片一排贴着右下角,底边与屏幕底边齐平。
-            return EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: DockGeom.bottomCornerInset)
-        }
-    }
-
-    /// 详情面板的定位:左右缘垂直居中于卡片列,下缘从卡片排上方顶出
-    /// (贴边卡片条的留位由面板内部自己处理)。
-    private func panelPadding(kind: DockPanelKind, panelHeight ph: CGFloat,
-                              panelWidth pw: CGFloat) -> EdgeInsets {
-        switch edge {
-        case .right, .left:
-            return EdgeInsets(top: panelTop(kind: kind, panelHeight: ph), leading: 0,
-                              bottom: 0, trailing: 0)
-        case .bottomRight:
-            return EdgeInsets()
-        }
-    }
-
     /// 面板全高、底边贴着可见区底边时,pill 仍落在拖好的高度上:
     /// 顶部偏移 = 面板高 - 底边距 - pill 高。静止窗口本身就是 pill,这个值是 0。
     private func pillTop(panelHeight h: CGFloat) -> CGFloat {
         max(0, h - dock.verticalOffset - DockGeom.pillHeight)
     }
+}
 
-    /// 锚点列高:与 hover 无关。"悬停显示数值"只伸缩被悬停的那张卡本身,
-    /// 整列顶端和详情面板的弹出位都用纯标题的列高计算——否则点击后指针
-    /// 离开卡片,列高缩回,整列连同面板当场滑一下(肉眼可见的"跳")。
-    /// 探出时只排那一张,并且数值算进高度(它一直亮着)。
+// MARK: - 展开层(扇形 + 详情面板)
+
+/// 只在贴边展开时挂上。收起后离开视图树,不再因为采样刷新而重绘。
+private struct EdgeDockLiveLayer: View {
+    @ObservedObject var dock: EdgeDockModel
+    unowned let controller: EdgeDockController
+    var panelHeight: CGFloat
+    @ObservedObject private var store = MonitorStore.shared
+    @ObservedObject private var settings = CardSettings.shared
+    @ObservedObject private var notes = NoteStore.shared
+
+    private var edge: DockEdge { dock.edge }
+    private var rootAlignment: Alignment {
+        switch edge {
+        case .right:       return .topTrailing
+        case .left:        return .topLeading
+        case .bottomRight: return .bottomTrailing
+        }
+    }
+
+    var body: some View {
+        ZStack(alignment: rootAlignment) {
+            MetricFanColumn(dock: dock, controller: controller, store: store)
+                .transition(.identity)
+                .padding(fanPadding)
+
+            if let kind = dock.state.expandedKind {
+                MetricPanelView(kind: kind, store: store, edge: edge,
+                                stripReserve: dock.bottomClearance,
+                                onClose: {
+                                    if controller.consumeDragClick() { return }
+                                    controller.collapse()
+                                })
+                    .padding(panelPadding(kind: kind))
+                    .transition(.modifier(active: PanelPull(hidden: true, edge: edge),
+                                           identity: PanelPull(hidden: false, edge: edge)))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: rootAlignment)
+    }
+
+    /// 锚点列高与悬停无关。探出时那一张把数值算进高度,其余按纯标题,
+    /// 避免指针离开卡片时整列连同面板滑一下。
     private var layoutCards: [DockPanelKind] {
         if let kind = dock.state.peekKind, EdgeDockCards.cards.contains(kind) { return [kind] }
         return EdgeDockCards.cards
@@ -168,7 +170,6 @@ struct EdgeDockRootView: View {
         let values = Dictionary(uniqueKeysWithValues: layoutCards.map {
             ($0, $0 == .note ? noteToken : CardMetrics.value(for: $0, store: store))
         })
-        // 探出的卡数值常显,高度按带数值算;其余时候仍按纯标题,避免悬停把整列顶走。
         let titleOnly = CardMetrics.displayValues(
             values, hovered: nil,
             hoverReveals: settings.hoverRevealsValue && dock.state.peekKind == nil)
@@ -176,34 +177,56 @@ struct EdgeDockRootView: View {
             + DockGeom.cogGap + DockGeom.cogSize
     }
 
-    /// 扇形以 pill 中心为轴向上展开,但不跑出屏幕。
-    private func fanTop(panelHeight h: CGFloat) -> CGFloat {
-        let pillCenter = h - dock.verticalOffset - DockGeom.pillHeight / 2
-        return min(max(12, pillCenter - anchorStack / 2), max(12, h - anchorStack - 12))
+    private var fanPadding: EdgeInsets {
+        switch edge {
+        case .right, .left:
+            return EdgeInsets(top: fanTop, leading: 0, bottom: 0, trailing: 0)
+        case .bottomRight:
+            return EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: DockGeom.bottomCornerInset)
+        }
     }
 
-    /// 详情面板固定在整列卡片的旁边垂直居中——所有卡共用一个弹出位,
-    /// 稳定可预期,不再跟着被点的卡片上下飞。
-    private func panelTop(kind: DockPanelKind, panelHeight h: CGFloat) -> CGFloat {
+    private func panelPadding(kind: DockPanelKind) -> EdgeInsets {
+        switch edge {
+        case .right, .left:
+            return EdgeInsets(top: panelTop(kind: kind), leading: 0, bottom: 0, trailing: 0)
+        case .bottomRight:
+            return EdgeInsets()
+        }
+    }
+
+    private var fanTop: CGFloat {
+        let pillCenter = panelHeight - dock.verticalOffset - DockGeom.pillHeight / 2
+        return min(max(12, pillCenter - anchorStack / 2), max(12, panelHeight - anchorStack - 12))
+    }
+
+    private func panelTop(kind: DockPanelKind) -> CGFloat {
         let panelH = DockGeom.panelHeight(kind)
-        let ideal = fanTop(panelHeight: h) + (anchorStack - panelH) / 2
-        return min(max(10, ideal), max(10, h - panelH - 10))
+        let ideal = fanTop + (anchorStack - panelH) / 2
+        return min(max(10, ideal), max(10, panelHeight - panelH - 10))
     }
 }
 
 // MARK: - Pill(静止时贴边的小圆点)
 
 struct MonitorPillView: View {
-    @ObservedObject var store: MonitorStore
+    @ObservedObject private var signals = MonitorStore.shared.signals
+    @ObservedObject private var settings = CardSettings.shared
     var edge: DockEdge = .right
-    /// 异常那根彩条的呼吸。视图一直在树上,动画只开一次。
+    /// 只有某张卡被点名时才呼吸。平时不开重复动画,避免小圆点一直在重绘。
     @State private var pulse = false
 
     var body: some View {
         pillContent
-            .onAppear {
-                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-                    pulse = true
+            .onChange(of: signals.attention != nil, initial: true) { _, alerting in
+                if alerting {
+                    withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                        pulse = true
+                    }
+                } else {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) { pulse = false }
                 }
             }
             .frame(width: edge.isBottom ? DockGeom.horizontalPillSize.width : DockGeom.pillWidth,
@@ -225,14 +248,14 @@ struct MonitorPillView: View {
     private var pillContent: some View {
         if edge.isBottom {
             HStack(spacing: DockGeom.dashGap) {
-                ForEach(EdgeDockCards.cards) { kind in
+                ForEach(settings.cards) { kind in
                     dash(kind)
                 }
             }
             .padding(.horizontal, DockGeom.pillPad)
         } else {
             VStack(spacing: DockGeom.dashGap) {
-                ForEach(EdgeDockCards.cards) { kind in
+                ForEach(settings.cards) { kind in
                     dash(kind)
                 }
             }
@@ -242,8 +265,8 @@ struct MonitorPillView: View {
 
     /// 用量越高色越实;被点名的那根在两档之间呼吸,直到卡片自己探出来。
     private func dash(_ kind: DockPanelKind) -> some View {
-        let alerting = store.attention == kind
-        let level = store.dashLevels.level(for: kind)
+        let alerting = signals.attention == kind
+        let level = signals.dashLevels.level(for: kind)
         return RoundedRectangle(cornerRadius: 2.5, style: .continuous)
             .fill(kind.palette.dash)
             .frame(width: DockGeom.dashWidth, height: DockGeom.dashHeight)
@@ -1673,7 +1696,7 @@ struct PulseCornerView: View {
 
 /// 细竖条站在底边上,只往上长。颜色跟设置走:自选一种,或每根条一个稳定的随机色。
 struct PulseSpectrumCanvas: View {
-    @ObservedObject private var model = PulseModel.shared
+    @ObservedObject private var frame = PulseModel.shared.frame
     @ObservedObject private var settings = CardSettings.shared
 
     var body: some View {
@@ -1681,7 +1704,7 @@ struct PulseSpectrumCanvas: View {
         let seed = settings.pulseColorSeed
         let fixed = settings.pulseColor
         Canvas { context, size in
-            let bands = model.bands
+            let bands = frame.bands
             let count = bands.count
             let slot = size.width / CGFloat(count)
             let barWidth = max(2, slot * 0.35)

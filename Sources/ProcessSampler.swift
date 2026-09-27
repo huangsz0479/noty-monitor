@@ -30,6 +30,8 @@ struct ProcInfo: Identifiable {
 struct ProcessSample {
     let date: Date
     let processes: [ProcInfo]
+    /// 卡片用的摘要。全表采样和轻量采样都填好,调用方不用再扫一遍。
+    let digest: ProcessDigest
 }
 
 /// 进程表的共享过滤/排序口径:完整窗口与贴边进程面板保持一致。
@@ -59,6 +61,8 @@ final class ProcessSampler {
     private static var uidCache: [UInt32: String] = [:]
     /// 可执行路径按 pid 缓存(进程活着时不变)。只在采样队列上访问。
     private var pathCache: [Int32: String] = [:]
+    /// sysctl 进程表缓冲区,按需扩容后复用,避免每拍再分配一整块。
+    private var listed: [kinfo_proc] = []
     /// JVM / node / python 的业务标签。空字符串表示命令行已读过、没有可展示的名字。
     /// 只在采样队列上访问。
     private var runtimeLabels: [Int32: String] = [:]
@@ -73,58 +77,141 @@ final class ProcessSampler {
         return Double(info.numer) / Double(info.denom) / 1_000_000_000
     }()
 
-    func sample(now: Date = Date()) -> ProcessSample {
+    /// fullList 为假时只保留摘要和 CPU 最高的几名,不给每个进程造字符串。
+    /// 贴边收起时走这条;进程面板或完整窗口打开时才做全表。
+    func sample(now: Date = Date(), fullList: Bool) -> ProcessSample {
         let elapsed = lastDate.map { now.timeIntervalSince($0) } ?? 0
-        let kinfo = Self.processList()
-        var result: [ProcInfo] = []
-        result.reserveCapacity(kinfo.count)
+        let count = loadProcesses()
         var next: [Int32: Double] = [:]
-        next.reserveCapacity(kinfo.count)
+        next.reserveCapacity(count)
+        let sample = fullList
+            ? sampleFull(count: count, elapsed: elapsed, now: now, next: &next)
+            : sampleLight(count: count, elapsed: elapsed, now: now, next: &next)
+        lastCPUSeconds = next
+        lastDate = now
+        pathCache = pathCache.filter { next[$0.key] != nil }
+        runtimeLabels = runtimeLabels.filter { next[$0.key] != nil }
+        return sample
+    }
+
+    private func sampleFull(count: Int, elapsed: TimeInterval, now: Date,
+                            next: inout [Int32: Double]) -> ProcessSample {
+        var result: [ProcInfo] = []
+        result.reserveCapacity(count)
         let myUID = getuid()
-
-        for kp in kinfo {
-            let pid = kp.kp_proc.p_pid
-            guard pid > 0 else { continue }              // 0 = kernel_task,读不到 taskinfo
-            if kp.kp_proc.p_stat == 5 { continue }       // 5 = SZOMB 僵尸进程
-
-            var info = proc_taskallinfo()
-            let size = Int32(MemoryLayout<proc_taskallinfo>.size)
-            guard proc_pidinfo(pid, PROC_PIDTASKALLINFO, 0, &info, size) == size else { continue }
-
-            let totalTicks = info.ptinfo.pti_total_user + info.ptinfo.pti_total_system
-            let seconds = Double(totalTicks) * Self.tickToSeconds
-            next[pid] = seconds
-
-            var cpu = 0.0
-            if elapsed > 0.05, let prev = lastCPUSeconds[pid] {
-                cpu = max(0, (seconds - prev) / elapsed * 100)
-            }
-
-            let uid = kp.kp_eproc.e_ucred.cr_uid
-            let path = self.path(for: pid)
-            let runtime = runtimeLabel(pid: pid, path: path)
-
+        for kp in listed.prefix(count) {
+            guard let measured = measure(kp, elapsed: elapsed, next: &next) else { continue }
+            let path = self.path(for: measured.pid)
+            let runtime = runtimeLabel(pid: measured.pid, path: path)
             result.append(ProcInfo(
-                pid: pid,
-                name: Self.displayName(path: path, comm: Self.commName(kp), pid: pid),
+                pid: measured.pid,
+                name: Self.displayName(path: path, comm: measured.comm, pid: measured.pid),
                 path: path,
-                user: Self.userName(uid),
-                cpuPercent: cpu,
-                memoryBytes: info.ptinfo.pti_resident_size,
-                threadCount: Int(info.ptinfo.pti_threadnum),
-                isCurrentUser: uid == myUID,
+                user: Self.userName(measured.uid),
+                cpuPercent: measured.cpu,
+                memoryBytes: measured.memory,
+                threadCount: measured.threads,
+                isCurrentUser: measured.uid == myUID,
                 isJava: runtime.isJava,
                 javaLabel: runtime.javaLabel,
                 scriptLabel: runtime.scriptLabel
             ))
         }
+        return ProcessSample(date: now, processes: result, digest: digest(of: result))
+    }
 
-        lastCPUSeconds = next
-        lastDate = now
-        // 清掉已退出进程的缓存。
-        pathCache = pathCache.filter { next[$0.key] != nil }
-        runtimeLabels = runtimeLabels.filter { next[$0.key] != nil }
-        return ProcessSample(date: now, processes: result)
+    /// 仍要扫一遍才能知道谁最忙、JVM 合计多少,但路径、用户名、命令行只解析前几名。
+    private func sampleLight(count: Int, elapsed: TimeInterval, now: Date,
+                             next: inout [Int32: Double]) -> ProcessSample {
+        var total = 0
+        var javaCount = 0
+        var javaMemory: UInt64 = 0
+        var javaCPU = 0.0
+        var top: [RankedProc] = []
+        top.reserveCapacity(Self.lightRankCount)
+        for kp in listed.prefix(count) {
+            guard let measured = measure(kp, elapsed: elapsed, next: &next) else { continue }
+            total += 1
+            let cachedName = pathCache[measured.pid].map { URL(fileURLWithPath: $0).lastPathComponent }
+            if (cachedName ?? measured.comm) == "java" {
+                javaCount += 1
+                javaMemory += measured.memory
+                javaCPU += measured.cpu
+            }
+            guard !ProcessDigest.noiseNames.contains(measured.comm) else { continue }
+            considerRank(&top, RankedProc(pid: measured.pid, cpu: measured.cpu,
+                                           memory: measured.memory, comm: measured.comm))
+        }
+        let ranked = top.map { lite -> ProcInfo in
+            let path = self.path(for: lite.pid)
+            let runtime = runtimeLabel(pid: lite.pid, path: path)
+            return ProcInfo(
+                pid: lite.pid,
+                name: Self.displayName(path: path, comm: lite.comm, pid: lite.pid),
+                path: path,
+                user: "",
+                cpuPercent: lite.cpu,
+                memoryBytes: lite.memory,
+                threadCount: 0,
+                isCurrentUser: false,
+                isJava: runtime.isJava || lite.comm == "java",
+                javaLabel: runtime.javaLabel,
+                scriptLabel: runtime.scriptLabel
+            )
+        }
+        var digest = digest(of: ranked)
+        digest.count = total
+        digest.javaCount = javaCount
+        digest.javaMemoryBytes = javaMemory
+        digest.javaCPU = javaCPU
+        return ProcessSample(date: now, processes: [], digest: digest)
+    }
+
+    private struct Measured {
+        var pid: Int32
+        var cpu: Double
+        var memory: UInt64
+        var threads: Int
+        var uid: UInt32
+        var comm: String
+    }
+
+    private struct RankedProc {
+        var pid: Int32
+        var cpu: Double
+        var memory: UInt64
+        var comm: String
+    }
+
+    private static let lightRankCount = 12
+
+    private func measure(_ kp: kinfo_proc, elapsed: TimeInterval,
+                         next: inout [Int32: Double]) -> Measured? {
+        let pid = kp.kp_proc.p_pid
+        guard pid > 0 else { return nil }            // 0 = kernel_task,读不到 taskinfo
+        if kp.kp_proc.p_stat == 5 { return nil }     // 5 = SZOMB 僵尸进程
+        var info = proc_taskallinfo()
+        let size = Int32(MemoryLayout<proc_taskallinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTASKALLINFO, 0, &info, size) == size else { return nil }
+        let seconds = Double(info.ptinfo.pti_total_user + info.ptinfo.pti_total_system) * Self.tickToSeconds
+        next[pid] = seconds
+        var cpu = 0.0
+        if elapsed > 0.05, let prev = lastCPUSeconds[pid] {
+            cpu = max(0, (seconds - prev) / elapsed * 100)
+        }
+        return Measured(pid: pid, cpu: cpu, memory: info.ptinfo.pti_resident_size,
+                        threads: Int(info.ptinfo.pti_threadnum),
+                        uid: kp.kp_eproc.e_ucred.cr_uid, comm: Self.commName(kp))
+    }
+
+    private func considerRank(_ top: inout [RankedProc], _ candidate: RankedProc) {
+        if top.count < Self.lightRankCount {
+            top.append(candidate)
+            return
+        }
+        guard let low = top.indices.min(by: { top[$0].cpu < top[$1].cpu }),
+              candidate.cpu > top[low].cpu else { return }
+        top[low] = candidate
     }
 
     /// 从一份进程表里抽出卡片要用的摘要。有锁定状态,只在采样队列上调用。
@@ -208,16 +295,22 @@ final class ProcessSampler {
 
     // MARK: - Helpers
 
-    private static func processList() -> [kinfo_proc] {
+    /// 把进程表读进 `listed`。返回有效条数;失败时返回 0。
+    private func loadProcesses() -> Int {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
         var size = 0
-        guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return [] }
+        guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return 0 }
         let capacity = size / MemoryLayout<kinfo_proc>.stride
-        guard capacity > 0 else { return [] }
-        var buffer = [kinfo_proc](repeating: kinfo_proc(), count: capacity)
-        guard sysctl(&mib, 4, &buffer, &size, nil, 0) == 0 else { return [] }
-        let count = size / MemoryLayout<kinfo_proc>.stride
-        return count > 0 ? Array(buffer.prefix(count)) : []
+        guard capacity > 0 else { return 0 }
+        if listed.count < capacity {
+            listed = [kinfo_proc](repeating: kinfo_proc(), count: capacity)
+        }
+        let written = listed.withUnsafeMutableBufferPointer { raw -> Int in
+            var bytes = raw.count * MemoryLayout<kinfo_proc>.stride
+            guard sysctl(&mib, 4, raw.baseAddress, &bytes, nil, 0) == 0 else { return 0 }
+            return bytes / MemoryLayout<kinfo_proc>.stride
+        }
+        return written
     }
 
     /// p_comm 是定长 Int8 元组,截到首个 NUL 转字符串。

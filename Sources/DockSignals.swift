@@ -48,6 +48,17 @@ struct DailyPeak: Equatable {
 
 // MARK: - 彩条深浅
 
+/// 贴边小圆点订阅的那一小节。彩条跨档、提醒变化才发,和曲线、快照分开。
+final class DockSignals: ObservableObject {
+    @Published private(set) var dashLevels = DashLevels()
+    @Published private(set) var attention: DockPanelKind?
+
+    func apply(levels: DashLevels, attention next: DockPanelKind?) {
+        if dashLevels != levels { dashLevels = levels }
+        if attention != next { attention = next }
+    }
+}
+
 /// 小圆点上每根彩条的强度,0...1,按 8 档量化,没跨档就不重绘。
 struct DashLevels: Equatable {
     var cpu = 0.0

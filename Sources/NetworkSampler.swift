@@ -31,14 +31,16 @@ final class NetworkSampler {
             totalOut += c.bytesOut
         }
         if elapsed > 0.05 {
-            snapshot.inPerSec = max(0, Double(totalIn - lastTotalIn) / elapsed)
-            snapshot.outPerSec = max(0, Double(totalOut - lastTotalOut) / elapsed)
+            // 网卡消失或计数清零时累计值会变小。UInt64 直接相减会 trap,
+            // 整进程退出;回退的这一拍速率记 0,下一拍再用新基线。
+            snapshot.inPerSec = Double(Self.counterDelta(totalIn, lastTotalIn)) / elapsed
+            snapshot.outPerSec = Double(Self.counterDelta(totalOut, lastTotalOut)) / elapsed
             for c in counters {
                 guard let prev = lastPerInterface[c.name] else { continue }
                 snapshot.interfaces.append((
                     name: c.name,
-                    inPerSec: max(0, Double(c.bytesIn - prev.0) / elapsed),
-                    outPerSec: max(0, Double(c.bytesOut - prev.1) / elapsed)))
+                    inPerSec: Double(Self.counterDelta(c.bytesIn, prev.0)) / elapsed,
+                    outPerSec: Double(Self.counterDelta(c.bytesOut, prev.1)) / elapsed))
             }
             snapshot.interfaces.sort { $0.inPerSec + $0.outPerSec > $1.inPerSec + $1.outPerSec }
         }
@@ -48,6 +50,11 @@ final class NetworkSampler {
         lastDate = now
         lastPerInterface = Dictionary(uniqueKeysWithValues: counters.map { ($0.name, ($0.bytesIn, $0.bytesOut)) })
         return snapshot
+    }
+
+    /// 计数回退时差值为 0,避免无符号减法溢出直接杀掉进程。
+    private static func counterDelta(_ current: UInt64, _ previous: UInt64) -> UInt64 {
+        current >= previous ? current - previous : 0
     }
 
     // MARK: sysctl

@@ -34,9 +34,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             w.minSize = NSSize(width: 760, height: 480)
             w.setFrameAutosaveName("SysMonMainWindow")
             w.delegate = self
-            w.contentView = NSHostingView(rootView: MonitorView(store: MonitorStore.shared))
             w.center()
             fullWindow = w
+        }
+        if fullWindow?.contentView == nil {
+            fullWindow?.contentView = NSHostingView(rootView: MonitorView(store: MonitorStore.shared))
         }
         if !holdingProcessList {
             holdingProcessList = true
@@ -51,8 +53,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             holdingProcessList = false
             MonitorStore.shared.releaseProcessList()
         }
+        // 关掉后卸掉 SwiftUI 树,否则窗口还在后台跟着每次采样重绘。
         // 完整窗口关掉后回到无 Dock 图标的常驻形态。
-        DispatchQueue.main.async { NSApp.setActivationPolicy(.accessory) }
+        DispatchQueue.main.async { [weak self] in
+            self?.fullWindow?.contentView = nil
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 
     @objc func refreshNowMenu() { MonitorStore.shared.sampleNow() }

@@ -33,10 +33,12 @@ final class DiskIOSampler {
 
         let elapsed = lastDate.map { now.timeIntervalSince($0) } ?? 0
         if elapsed > 0.05 {
-            snapshot.readBytesPerSec = max(0, Double(totals.read &- lastRead) / elapsed)
-            snapshot.writeBytesPerSec = max(0, Double(totals.written &- lastWritten) / elapsed)
-            snapshot.readOpsPerSec = max(0, Double(totals.readOps &- lastReadOps) / elapsed)
-            snapshot.writeOpsPerSec = max(0, Double(totals.writeOps &- lastWriteOps) / elapsed)
+            // 磁盘计数回退时按 0 计。回绕减法得到的是接近 UInt64.max 的值,
+            // max(0, ...) 钳不住,会把这一拍画成巨大尖峰。
+            snapshot.readBytesPerSec = Double(Self.counterDelta(totals.read, lastRead)) / elapsed
+            snapshot.writeBytesPerSec = Double(Self.counterDelta(totals.written, lastWritten)) / elapsed
+            snapshot.readOpsPerSec = Double(Self.counterDelta(totals.readOps, lastReadOps)) / elapsed
+            snapshot.writeOpsPerSec = Double(Self.counterDelta(totals.writeOps, lastWriteOps)) / elapsed
         }
 
         lastRead = totals.read
@@ -45,6 +47,11 @@ final class DiskIOSampler {
         lastWriteOps = totals.writeOps
         lastDate = now
         return snapshot
+    }
+
+    /// 计数回退时差值为 0,避免回绕后速率失真。
+    private static func counterDelta(_ current: UInt64, _ previous: UInt64) -> UInt64 {
+        current >= previous ? current - previous : 0
     }
 
     // MARK: IOKit

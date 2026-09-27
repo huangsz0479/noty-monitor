@@ -2,21 +2,28 @@ import Foundation
 import CoreAudio
 import Accelerate
 import AVFoundation
+import os
 
 // MARK: - 声音律动(系统输出频谱)
 
-/// 律动的实时数据。独立于 MonitorStore:30Hz 的发布只触发律动视图重绘,
-/// 不拖着整列指标卡每秒重画 30 次。
+/// 左下角频谱条。只有条的高度变了才发布。
+final class PulseFrame: ObservableObject {
+    @Published private(set) var bands: [Double] = Array(repeating: 0, count: PulseModel.bandCount)
+
+    func update(_ next: [Double]) {
+        guard next != bands else { return }
+        bands = next
+    }
+}
+
+/// 律动的实时数据。独立于 MonitorStore:频谱条和诊断分开,
+/// 没声音时不把左下角按 30Hz 重画。
 final class PulseModel: ObservableObject {
     static let shared = PulseModel()
     static let bandCount = 24
 
-    /// 各频段能量 0...1(已做快攻慢放平滑)。
-    @Published var bands: [Double] = Array(repeating: 0, count: PulseModel.bandCount)
-    /// 频段峰值保持线(衰减更慢,画"冒泡点"用)。
-    @Published var peaks: [Double] = Array(repeating: 0, count: PulseModel.bandCount)
-    /// 整体响度 0...1。
-    @Published var level: Double = 0
+    /// 频谱条。和诊断信息分开,设置页刷新诊断时不会带动左下角重画。
+    let frame = PulseFrame()
     /// 是否正在采集。
     @Published var running = false
     /// 授权/设备错误等需要展示的状态。
@@ -30,6 +37,10 @@ final class PulseModel: ObservableObject {
 ///
 /// 权限:截取系统播放走「系统音频录制」(Info.plist 的
 /// NSAudioCaptureUsageDescription)。只允许「麦克风」时缓冲全是 0。
+///
+/// 抽头 muteBehavior 保持 unmuted,只旁路读取,不把播放静音。
+/// 没人播放时不拆抽头:拆掉再挂,音频服务有时会把下一次播放的通路弄断。
+/// 输出设备或采样率变了,以及正在播放却收不到声音时,才重挂。
 final class AudioSpectrumSampler {
     // CoreAudio 状态
     private var tapID: AudioObjectID = 0
@@ -48,8 +59,9 @@ final class AudioSpectrumSampler {
     /// 每个输入缓冲的峰值,用来发现"抽头不在我们以为的那几路"。
     private var bufferPeaks = [Float](repeating: 0, count: 16)
 
-    // 采样环形缓冲(IO 实时线程写,分析线程读)
-    private let lock = NSLock()
+    // 采样环形缓冲(IO 实时线程写,分析线程读)。
+    // 实时线程只用 trylock:等锁会堵住系统混音,声音就放不出来。
+    private let gate = OSAllocatedUnfairLock()
     private var ring = [Float](repeating: 0, count: 1 << 15)
     private var ringMask = (1 << 15) - 1
     private var ringWrite = 0
@@ -73,12 +85,23 @@ final class AudioSpectrumSampler {
     private var shouldRun = false
     /// 采样期间禁止 App Nap(否则后台队列与音频被节流,律动会静默死掉)。
     private var activityToken: NSObjectProtocol?
-    /// 自愈:抽头在静默期创建的话,音频服务可能把空混音固定在它身上——
-    /// IO 一直有回调但数据全零。检测到这种状态就摘掉重挂一个新抽头。
+    /// 上次收到非零波形的时间。正在播放却一直是 0,说明抽头挂死了。
     private var lastNonZeroAt = Date()
     private var lastRecreateAt = Date.distantPast
-    private var lastSeenCallbacks = 0
     private var healCount = 0
+    /// 输出设备从「没人播放」变成「正在播放」的时刻。没人播放时不重挂。
+    private var sawOutputRunning = false
+    private var outputRunningSince = Date.distantPast
+    /// IO 回调刚进来就记下的时刻。不拿 gate,这样丢掉缓冲时也知道回调还活着。
+    private let lastIOTick = OSAllocatedUnfairLock(initialState: UInt64(0))
+    private var outputDeviceListener: AudioObjectPropertyListenerBlock?
+    private var systemOutputListener: AudioObjectPropertyListenerBlock?
+    private var rateListener: AudioObjectPropertyListenerBlock?
+    private var rateDeviceID: AudioDeviceID = 0
+    private var watchedRate: Double = 0
+    private var watchedOutputID: AudioDeviceID = 0
+    private var watchedSystemOutputID: AudioDeviceID = 0
+    private var rebuildWork: DispatchWorkItem?
     /// IO 回调计数(诊断用,锁内读写)。
     private var ioCallbacks = 0
     private var totalFrames = 0
@@ -101,12 +124,17 @@ final class AudioSpectrumSampler {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         switch status {
         case .authorized:
-            setupQueue.async { [weak self] in self?.setupTap() }
+            setupQueue.async { [weak self] in
+                guard let self else { return }
+                self.installOutputListeners()
+                self.setupTap()
+            }
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 self?.setupQueue.async {
                     guard let self, self.shouldRun else { return }
                     if granted {
+                        self.installOutputListeners()
                         self.setupTap()
                     } else {
                         self.fail("未获得音频访问授权。请在 系统设置 → 隐私与安全性 → 系统音频录制 里允许系统监视器。")
@@ -125,7 +153,182 @@ final class AudioSpectrumSampler {
             ProcessInfo.processInfo.endActivity(activityToken)
             self.activityToken = nil
         }
-        setupQueue.async { [weak self] in self?.teardown() }
+        rebuildWork?.cancel()
+        setupQueue.async { [weak self] in
+            guard let self else { return }
+            self.rebuildWork?.cancel()
+            self.removeOutputListeners()
+            self.teardown()
+        }
+    }
+
+    /// 必须在 setupQueue 上调用。minimumInterval 把静音自愈和设备切换的风暴分开:
+    /// 静音自愈拆得太勤,会把下一次播放的通路弄断。
+    private func scheduleRebuild(reason: String, minimumInterval: TimeInterval) {
+        guard shouldRun else { return }
+        let elapsed = Date().timeIntervalSince(lastRecreateAt)
+        rebuildWork?.cancel()
+        if elapsed < minimumInterval {
+            let work = DispatchWorkItem { [weak self] in
+                self?.scheduleRebuild(reason: reason, minimumInterval: minimumInterval)
+            }
+            rebuildWork = work
+            setupQueue.asyncAfter(deadline: .now() + (minimumInterval - elapsed), execute: work)
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.shouldRun else { return }
+            self.lastRecreateAt = Date()
+            self.lastNonZeroAt = Date()
+            self.healCount += 1
+            self.updateDiag("⑥ 第 \(self.healCount) 次重挂抽头（\(reason)）")
+            self.teardown()
+            guard self.shouldRun else { return }
+            self.setupTap()
+        }
+        rebuildWork = work
+        setupQueue.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    private func installOutputListeners() {
+        guard outputDeviceListener == nil else { return }
+        outputDeviceListener = addSystemListener(kAudioHardwarePropertyDefaultOutputDevice) { [weak self] in
+            guard let self, let device = Self.defaultOutputDevice(), device != self.watchedOutputID else { return }
+            self.scheduleRebuild(reason: "输出设备切换", minimumInterval: 1)
+        }
+        systemOutputListener = addSystemListener(kAudioHardwarePropertyDefaultSystemOutputDevice) { [weak self] in
+            guard let self, let device = Self.systemOutputDevice(), device != self.watchedSystemOutputID else { return }
+            self.scheduleRebuild(reason: "系统提示音设备切换", minimumInterval: 1)
+        }
+    }
+
+    private func addSystemListener(_ selector: AudioObjectPropertySelector,
+                                   _ body: @escaping () -> Void) -> AudioObjectPropertyListenerBlock {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let listener: AudioObjectPropertyListenerBlock = { _, _ in body() }
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, setupQueue, listener)
+        return listener
+    }
+
+    private func removeOutputListeners() {
+        if let listener = outputDeviceListener {
+            removeSystemListener(kAudioHardwarePropertyDefaultOutputDevice, listener)
+            outputDeviceListener = nil
+        }
+        if let listener = systemOutputListener {
+            removeSystemListener(kAudioHardwarePropertyDefaultSystemOutputDevice, listener)
+            systemOutputListener = nil
+        }
+        unwatchOutputRate()
+    }
+
+    private func removeSystemListener(_ selector: AudioObjectPropertySelector,
+                                      _ listener: @escaping AudioObjectPropertyListenerBlock) {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, setupQueue, listener)
+    }
+
+    /// 耳机或蓝牙切换采样率时,旧抽头还按原来的速率走,播放会直接没声。
+    private func watchOutputRate() {
+        unwatchOutputRate()
+        guard let device = Self.defaultOutputDevice() else { return }
+        watchedRate = Self.nominalRate(of: device)
+        watchedOutputID = device
+        watchedSystemOutputID = Self.systemOutputDevice() ?? 0
+        rateDeviceID = device
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            let rate = Self.nominalRate(of: device)
+            guard rate > 0, abs(rate - self.watchedRate) > 1 else { return }
+            self.scheduleRebuild(reason: "输出采样率变了", minimumInterval: 1)
+        }
+        rateListener = listener
+        AudioObjectAddPropertyListenerBlock(device, &address, setupQueue, listener)
+    }
+
+    private func unwatchOutputRate() {
+        guard let listener = rateListener, rateDeviceID != 0 else {
+            rateListener = nil
+            rateDeviceID = 0
+            return
+        }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectRemovePropertyListenerBlock(rateDeviceID, &address, setupQueue, listener)
+        rateListener = nil
+        rateDeviceID = 0
+    }
+
+    private static func defaultOutputDevice() -> AudioDeviceID? {
+        copyDevice(kAudioHardwarePropertyDefaultOutputDevice)
+    }
+
+    private static func systemOutputDevice() -> AudioDeviceID? {
+        copyDevice(kAudioHardwarePropertyDefaultSystemOutputDevice)
+    }
+
+    private static func copyDevice(_ selector: AudioObjectPropertySelector) -> AudioDeviceID? {
+        var device = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device)
+        guard status == noErr, device != 0 else { return nil }
+        return device
+    }
+
+    /// 默认输出上有没有客户端正在播放。没人播放时扬声器这项是 0。
+    private static func outputIsRunning() -> Bool {
+        guard let device = defaultOutputDevice() else { return false }
+        var running: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &running) == noErr else {
+            return false
+        }
+        return running != 0
+    }
+
+    private static func nominalRate(of device: AudioDeviceID) -> Double {
+        var rate = Float64(0)
+        var size = UInt32(MemoryLayout<Float64>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &rate) == noErr else { return 0 }
+        return rate
+    }
+
+    private static let ticksToSeconds: Double = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return Double(info.numer) / Double(info.denom) / 1_000_000_000
+    }()
+
+    private static func secondsSince(_ tick: UInt64) -> Double {
+        guard tick != 0 else { return .infinity }
+        return Double(mach_absolute_time() &- tick) * ticksToSeconds
     }
 
     // MARK: 装配
@@ -240,6 +443,7 @@ final class AudioSpectrumSampler {
         }
 
         setupAnalysis()
+        watchOutputRate()
         updateDiag("⑤ IO 已启动,等待数据…")
         DispatchQueue.main.async {
             PulseModel.shared.running = true
@@ -274,6 +478,7 @@ final class AudioSpectrumSampler {
     private func teardown() {
         analysisTimer?.cancel()
         analysisTimer = nil
+        unwatchOutputRate()
         if aggregateID != 0 {
             if let proc = ioProcID {
                 AudioDeviceStop(aggregateID, proc)
@@ -287,18 +492,17 @@ final class AudioSpectrumSampler {
             AudioHardwareDestroyProcessTap(tapID)
             tapID = 0
         }
-        lock.lock()
-        ringFilled = 0
-        ringWrite = 0
-        display = Array(repeating: 0, count: PulseModel.bandCount)
-        peaks = Array(repeating: 0, count: PulseModel.bandCount)
-        displayLevel = 0
-        lock.unlock()
+        lastIOTick.withLockUnchecked { $0 = 0 }
+        gate.withLockUnchecked {
+            ringFilled = 0
+            ringWrite = 0
+            display = Array(repeating: 0, count: PulseModel.bandCount)
+            peaks = Array(repeating: 0, count: PulseModel.bandCount)
+            displayLevel = 0
+        }
         DispatchQueue.main.async {
             PulseModel.shared.running = false
-            PulseModel.shared.bands = Array(repeating: 0, count: PulseModel.bandCount)
-            PulseModel.shared.peaks = Array(repeating: 0, count: PulseModel.bandCount)
-            PulseModel.shared.level = 0
+            PulseModel.shared.frame.update(Array(repeating: 0, count: PulseModel.bandCount))
         }
     }
 
@@ -311,19 +515,28 @@ final class AudioSpectrumSampler {
     private var nullInputCallbacks = 0
 
     private func ingest(_ list: UnsafePointer<AudioBufferList>, output: UnsafeMutablePointer<AudioBufferList>) {
+        lastIOTick.withLockUnchecked { $0 = mach_absolute_time() }
         let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer<AudioBufferList>(mutating: list))
         let outputs = UnsafeMutableAudioBufferListPointer(output)
-        lock.lock()
+        // 实时线程不能等锁。分析线程拿着锁时丢掉这一小段,立刻把回调还回去,
+        // 否则系统混音会被堵住,表现就是声音放不出来。
+        guard gate.withLockIfAvailableUnchecked({ () -> Bool in
+            self.ingestLocked(buffers, outputs: outputs)
+            return true
+        }) != nil else { return }
+    }
+
+    /// 调用方已拿着 gate。
+    private func ingestLocked(_ buffers: UnsafeMutableAudioBufferListPointer,
+                              outputs: UnsafeMutableAudioBufferListPointer) {
         ioCallbacks += 1
         lastInputBuffers = buffers.count
         lastOutputBuffers = outputs.count
         lastOutputPeak = max(lastOutputPeak, peak(of: outputs))
         guard !buffers.isEmpty, buffers[0].mData != nil else {
             nullInputCallbacks += 1
-            lock.unlock()
             return
         }
-        defer { lock.unlock() }
         // 格式报的声道数有时不含抽头,实际缓冲更多。放宽后才能把窗口挪过去。
         if !interleaved, buffers.count > channels { channels = buffers.count }
         noteBufferPeaks(buffers)
@@ -417,21 +630,18 @@ final class AudioSpectrumSampler {
 
     /// 抽头那几路是静音、但别的声道有声音时,把窗口挪到最响的那一路上。
     private func realignTapChannelsIfNeeded(sliceRMS rms: Float) {
-        lock.lock()
-        let peaks = bufferPeaks
-        bufferPeaks = Array(repeating: 0, count: bufferPeaks.count)
-        let current = tapChannelOffset
-        let width = tapChannelCount
-        lock.unlock()
+        let (peaks, current, width, channelCount) = gate.withLockUnchecked { () -> ([Float], Int, Int, Int) in
+            let peaks = bufferPeaks
+            bufferPeaks = Array(repeating: 0, count: bufferPeaks.count)
+            return (peaks, tapChannelOffset, tapChannelCount, channels)
+        }
         guard rms < 1e-4 else { return }
         guard let loud = peaks.enumerated().max(by: { $0.element < $1.element }),
               loud.element > 1e-3 else { return }
         let windowEnd = current + width
         guard loud.offset < current || loud.offset >= windowEnd else { return }
-        let shifted = max(0, min(loud.offset, max(0, channels - width)))
-        lock.lock()
-        tapChannelOffset = shifted
-        lock.unlock()
+        let shifted = max(0, min(loud.offset, max(0, channelCount - width)))
+        gate.withLockUnchecked { tapChannelOffset = shifted }
     }
 
     private func push(_ sample: Float) {
@@ -441,54 +651,80 @@ final class AudioSpectrumSampler {
     }
 
     private func latestSamples(_ count: Int) -> [Float]? {
-        lock.lock()
-        defer { lock.unlock() }
+        gate.withLockUnchecked { () -> [Float]? in
         guard ringFilled >= count else { return nil }
         var result = [Float](repeating: 0, count: count)
         let start = (ringWrite - count + ring.count) & ringMask
         for i in 0..<count { result[i] = ring[(start + i) & ringMask] }
         return result
+        }
+    }
+
+    /// 只在扬声器正在出声时重挂。没人播放就拆抽头,下一次播放有时会直接没声。
+    private func considerRebuild() {
+        let playing = Self.outputIsRunning()
+        let now = Date()
+        if playing {
+            if !sawOutputRunning {
+                outputRunningSince = now
+                sawOutputRunning = true
+            }
+        } else {
+            sawOutputRunning = false
+            return
+        }
+        guard now.timeIntervalSince(outputRunningSince) > 2.5 else { return }
+        let ioAge = Self.secondsSince(lastIOTick.withLockUnchecked { $0 })
+        let silentFor = now.timeIntervalSince(lastNonZeroAt)
+        let stalled = ioAge > 2.5
+        let deaf = silentFor > 2.5
+        guard stalled || deaf else { return }
+        let reason = stalled ? "正在播放,但抽头回调停了" : "正在播放,但抽头全是静音"
+        setupQueue.async { [weak self] in
+            self?.scheduleRebuild(reason: reason, minimumInterval: 8)
+        }
     }
 
     // MARK: 频谱分析(分析线程)
 
     private func analyze() {
-        guard var samples = latestSamples(fftSize), let setup = fftSetup else { return }
-        // 去掉直流,免得最低那几根条被偏移量顶满。
+        guard var samples = latestSamples(fftSize) else { return }
+        // 去掉直流,免得最低那几根条被偏移量顶满。响度也在去直流之后算,
+        // 这样静音判断和以前做完 FFT 再算 RMS 是同一口径。
         var dc: Float = 0
         vDSP_meanv(samples, 1, &dc, vDSP_Length(samples.count))
         if dc != 0 {
             var neg = -dc
             vDSP_vsadd(samples, 1, &neg, &samples, 1, vDSP_Length(samples.count))
         }
-        // 实数 FFT(vDSP_fft_zrip)的打包输入:偶数位样本进 real,奇数位进 imag。
-        for i in 0..<fftSize / 2 {
-            fftReal[i] = samples[2 * i] * window[2 * i]
-            fftImag[i] = samples[2 * i + 1] * window[2 * i + 1]
-        }
-        let half = vDSP_Length(fftSize / 2)
-        fftReal.withUnsafeMutableBufferPointer { real in
-            fftImag.withUnsafeMutableBufferPointer { imag in
-                var split = DSPSplitComplex(realp: real.baseAddress!, imagp: imag.baseAddress!)
-                vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
-                // 未归一的幅度大约是「采样幅度 × 点数」,普通音量也会算出几十 dB,
-                // 再一截断就整根贴满。除以点数后 1.0 才是满幅。
-                var scale = Float(1) / Float(fftSize)
-                vDSP_vsmul(split.realp, 1, &scale, split.realp, 1, half)
-                vDSP_vsmul(split.imagp, 1, &scale, split.imagp, 1, half)
-                split.imagp[0] = 0
-                vDSP_zvabs(&split, 1, &magnitudes, 1, half)
-            }
-        }
-
-        let floorDB: Float = -50     // 低于这档算没声音,条纹高度为 0
-        let rangeDB: Float = 50      // -50 dB → 0,0 dB(满幅)→ 1,中间有高低
         var rms: Float = 0
         vDSP_rmsqv(samples, 1, &rms, vDSP_Length(samples.count))
+        let floorDB: Float = -50     // 低于这档算没声音,条纹高度为 0
+        let rangeDB: Float = 50      // -50 dB → 0,0 dB(满幅)→ 1,中间有高低
         let rmsDB = 20 * log10(max(rms, 1e-7))
         let audible = rmsDB >= floorDB
-        var next = [Double](repeating: 0, count: PulseModel.bandCount)
-        if audible {
+
+        var next = display
+        if audible, let setup = fftSetup {
+            // 实数 FFT(vDSP_fft_zrip)的打包输入:偶数位样本进 real,奇数位进 imag。
+            for i in 0..<fftSize / 2 {
+                fftReal[i] = samples[2 * i] * window[2 * i]
+                fftImag[i] = samples[2 * i + 1] * window[2 * i + 1]
+            }
+            let half = vDSP_Length(fftSize / 2)
+            fftReal.withUnsafeMutableBufferPointer { real in
+                fftImag.withUnsafeMutableBufferPointer { imag in
+                    var split = DSPSplitComplex(realp: real.baseAddress!, imagp: imag.baseAddress!)
+                    vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+                    // 未归一的幅度大约是「采样幅度 × 点数」,普通音量也会算出几十 dB,
+                    // 再一截断就整根贴满。除以点数后 1.0 才是满幅。
+                    var scale = Float(1) / Float(fftSize)
+                    vDSP_vsmul(split.realp, 1, &scale, split.realp, 1, half)
+                    vDSP_vsmul(split.imagp, 1, &scale, split.imagp, 1, half)
+                    split.imagp[0] = 0
+                    vDSP_zvabs(&split, 1, &magnitudes, 1, half)
+                }
+            }
             for (b, range) in bandRanges.enumerated() {
                 var sum: Float = 0
                 for bin in range { sum += magnitudes[bin] }
@@ -503,6 +739,7 @@ final class AudioSpectrumSampler {
                 peaks[b] = max(shown, peaks[b] * 0.90)
             }
         } else {
+            // 没声音就不做 FFT,只把还没收完的条放下去。
             for b in display.indices {
                 let released = display[b] * 0.55
                 next[b] = released < 0.02 ? 0 : released
@@ -511,51 +748,33 @@ final class AudioSpectrumSampler {
         }
         let level = audible ? Double(max(0, min(1, (rmsDB - floorDB) / rangeDB))) : 0
         let releasedLevel = audible ? max(level, displayLevel * 0.74) : displayLevel * 0.55
-
-        display = next
         displayLevel = releasedLevel < 0.02 ? 0 : releasedLevel
 
-        // 死抽头自愈:IO 一直在回调、但连续 15 秒数据全零 → 摘掉重挂一个
-        // 新抽头。在静默期创建的抽头,音频服务可能把空混音固定在它身上,
-        // 音乐开始后也收不到;重挂时音乐在放,就能挂上。真正的静默期 IO 会
-        // 整个停掉(ioAlive 不成立),不会触发。30 秒内最多重挂一次。
-        let hasSignal = rms > 1e-4 || (next.max() ?? 0) > 0.002
-        if hasSignal { lastNonZeroAt = Date() }
-        let now = Date()
-        let ioAlive = ioCallbacks != lastSeenCallbacks
-        lastSeenCallbacks = ioCallbacks
-        if !hasSignal, ioAlive,
-           now.timeIntervalSince(lastNonZeroAt) > 15,
-           now.timeIntervalSince(lastRecreateAt) > 30 {
-            lastRecreateAt = now
-            lastNonZeroAt = now
-            healCount += 1
-            updateDiag("⑥ 第 \(healCount) 次自动重挂抽头(有回调但无数据)…")
-            setupQueue.async { [weak self] in
-                guard let self, self.shouldRun else { return }
-                self.teardown()
-                guard self.shouldRun else { return }
-                self.setupTap()
+        let changed = next != display
+        display = next
+        if rms > 1e-4 || (next.max() ?? 0) > 0.002 { lastNonZeroAt = Date() }
+        if changed {
+            let bands = next
+            DispatchQueue.main.async {
+                PulseModel.shared.frame.update(bands)
             }
-            return
         }
+        noteDiagnostics(rms: rms)
+    }
 
-        // 每秒把分析侧诊断推到面板/设置页:能看到数据是不是真的在流。
-        if Date().timeIntervalSince(lastDiagAt) > 1 {
-            lastDiagAt = Date()
-            lock.lock()
+    /// 每秒把分析侧诊断推到设置页。频谱条不订这份数据。
+    private func noteDiagnostics(rms: Float) {
+        guard Date().timeIntervalSince(lastDiagAt) > 1 else { return }
+        lastDiagAt = Date()
+        let (loudest, callbacks) = gate.withLockUnchecked { () -> (Float, Int) in
             let loudest = bufferPeaks.max() ?? 0
             lastOutputPeak = 0
-            lock.unlock()
-            realignTapChannelsIfNeeded(sliceRMS: rms)
-            updateDiag(String(format: "回调 %d 次 · rms=%.4f · 输入峰值 %.4f · 重挂 %d 次",
-                              ioCallbacks, rms, loudest, healCount))
+            return (loudest, ioCallbacks)
         }
-        DispatchQueue.main.async {
-            PulseModel.shared.bands = next
-            PulseModel.shared.peaks = self.peaks
-            PulseModel.shared.level = self.displayLevel
-        }
+        considerRebuild()
+        realignTapChannelsIfNeeded(sliceRMS: rms)
+        updateDiag(String(format: "回调 %d 次 · rms=%.4f · 输入峰值 %.4f · 重挂 %d 次",
+                          callbacks, rms, loudest, healCount))
     }
 
     /// 40Hz–16kHz 之间 24 个对数等比频段对应的 FFT bin 区间。

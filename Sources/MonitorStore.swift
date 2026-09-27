@@ -15,8 +15,10 @@ final class MonitorStore: ObservableObject {
     @Published private(set) var dailyPeak: DailyPeak?
     /// 静止时该自己探出来的那张卡。
     @Published private(set) var attention: DockPanelKind?
-    /// 小圆点彩条的强度,跨档才变。
+    /// 小圆点彩条的强度,跨档才变。贴边小圆点订的是 signals,不订整份 store。
     @Published private(set) var dashLevels = DashLevels()
+    /// 只带彩条和提醒。收起时小圆点订这个,采样写曲线不会把它画一遍。
+    let signals = DockSignals()
     @Published private(set) var system = SystemSnapshot()
     @Published private(set) var cpuHistory: [Double] = []   // 全核聚合 %
     @Published private(set) var memHistory: [Double] = []   // 已用 GiB
@@ -135,8 +137,9 @@ final class MonitorStore: ObservableObject {
     }
 
     private func performSample() {
-        let processSample = processSampler.sample()
-        let digest = processSampler.digest(of: processSample.processes)
+        let fullList = wantsProcessList
+        let processSample = processSampler.sample(fullList: fullList)
+        let digest = processSample.digest
         let now = processSample.date
         let systemSnapshot = systemSampler.sample(now: now)
         let netSnapshot = networkSampler.sample(now: now)
@@ -154,8 +157,8 @@ final class MonitorStore: ObservableObject {
         let batteryInfo = cachedBattery
         let volumeList = cachedVolumes
         let ipList = cachedIPs
-        // 没人看进程表时不把整张表送上主线程。
-        let listed = wantsProcessList ? processSample.processes : nil
+        // 轻量采样时 processes 是空的,不要用它把界面上的表清掉。
+        let listed = fullList ? processSample.processes : nil
         DispatchQueue.main.async { [weak self] in
             self?.apply(processes: listed, digest: digest, system: systemSnapshot,
                         net: netSnapshot, io: ioSnapshot, battery: batteryInfo,
@@ -168,7 +171,11 @@ final class MonitorStore: ObservableObject {
                        net netSnapshot: NetSnapshot, io ioSnapshot: DiskIOSnapshot,
                        battery batteryInfo: BatteryInfo?,
                        volumes volumeList: [VolumeInfo], localIPs ipList: [LocalIPReader.Address]) {
-        if let listed { processes = listed }
+        if let listed {
+            processes = listed
+        } else if !processes.isEmpty {
+            processes = []
+        }
         if digest != processDigest { digest = processDigest }
         system = snapshot
         net = netSnapshot
@@ -238,6 +245,7 @@ final class MonitorStore: ObservableObject {
             glmRemaining: glmPlan?.fiveHour?.remainingPercent,
             enabled: Set(CardSettings.shared.cards))
         if attention != next { attention = next }
+        signals.apply(levels: dashLevels, attention: attention)
     }
 
     /// 强制退出(SIGKILL)。其他用户的进程会失败,由调用方展示错误。
