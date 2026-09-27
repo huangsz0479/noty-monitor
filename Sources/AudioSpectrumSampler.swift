@@ -89,6 +89,11 @@ final class AudioSpectrumSampler {
     private var lastNonZeroAt = Date()
     private var lastRecreateAt = Date.distantPast
     private var healCount = 0
+    /// 因「有回调但全是静音」已经重挂的次数。只在 setupQueue 上改。
+    /// 输出设备经常被浏览器占着却没有可听内容,不能因此无限拆建抽头。
+    private var deafHeals = 0
+    /// 分析线程上的记号:静音预算已经被花过,听到声音或停止播放时清一次。
+    private var deafHealsClear = true
     /// 输出设备从「没人播放」变成「正在播放」的时刻。没人播放时不重挂。
     private var sawOutputRunning = false
     private var outputRunningSince = Date.distantPast
@@ -159,27 +164,37 @@ final class AudioSpectrumSampler {
             self.rebuildWork?.cancel()
             self.removeOutputListeners()
             self.teardown()
+            self.releaseFFT()
         }
     }
 
     /// 必须在 setupQueue 上调用。minimumInterval 把静音自愈和设备切换的风暴分开:
     /// 静音自愈拆得太勤,会把下一次播放的通路弄断。
-    private func scheduleRebuild(reason: String, minimumInterval: TimeInterval) {
+    /// forSilence 为真时改用退避间隔,试过几次就停,等下次真正开始播放再试。
+    private func scheduleRebuild(reason: String, minimumInterval: TimeInterval, forSilence: Bool = false) {
         guard shouldRun else { return }
+        let interval: TimeInterval
+        if forSilence {
+            guard let silenceInterval = Self.silenceHealInterval(after: deafHeals) else { return }
+            interval = silenceInterval
+        } else {
+            interval = minimumInterval
+        }
         let elapsed = Date().timeIntervalSince(lastRecreateAt)
         rebuildWork?.cancel()
-        if elapsed < minimumInterval {
+        if elapsed < interval {
             let work = DispatchWorkItem { [weak self] in
-                self?.scheduleRebuild(reason: reason, minimumInterval: minimumInterval)
+                self?.scheduleRebuild(reason: reason, minimumInterval: interval, forSilence: forSilence)
             }
             rebuildWork = work
-            setupQueue.asyncAfter(deadline: .now() + (minimumInterval - elapsed), execute: work)
+            setupQueue.asyncAfter(deadline: .now() + (interval - elapsed), execute: work)
             return
         }
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.shouldRun else { return }
             self.lastRecreateAt = Date()
             self.lastNonZeroAt = Date()
+            if forSilence { self.deafHeals += 1 } else { self.deafHeals = 0 }
             self.healCount += 1
             self.updateDiag("⑥ 第 \(self.healCount) 次重挂抽头（\(reason)）")
             self.teardown()
@@ -188,6 +203,13 @@ final class AudioSpectrumSampler {
         }
         rebuildWork = work
         setupQueue.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    /// 静音自愈间隔:8 秒、30 秒、2 分钟,之后放弃,直到播放状态重新跳变。
+    private static func silenceHealInterval(after heals: Int) -> TimeInterval? {
+        let steps: [TimeInterval] = [8, 30, 120]
+        guard heals >= 0, heals < steps.count else { return nil }
+        return steps[heals]
     }
 
     private func installOutputListeners() {
@@ -452,12 +474,19 @@ final class AudioSpectrumSampler {
     }
 
     private func setupAnalysis() {
-        window = [Float](repeating: 0, count: fftSize)
-        vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
-        fftReal = [Float](repeating: 0, count: fftSize)
-        fftImag = [Float](repeating: 0, count: fftSize)
-        magnitudes = [Float](repeating: 0, count: fftSize / 2)
-        fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
+        if window.count != fftSize {
+            window = [Float](repeating: 0, count: fftSize)
+            vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
+            fftReal = [Float](repeating: 0, count: fftSize)
+            fftImag = [Float](repeating: 0, count: fftSize)
+            magnitudes = [Float](repeating: 0, count: fftSize / 2)
+        }
+        // FFTSetup 是 vDSP 的裸指针,直接赋新值不会释放旧的。点数固定,
+        // 只建一次;重挂抽头时若每次都重建,一套旋转因子大约 190KB,
+        // 几小时就能堆到几百 MB。
+        if fftSetup == nil {
+            fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
+        }
         bandRanges = Self.makeBandRanges(sampleRate: sampleRate, fftSize: fftSize)
 
         let timer = DispatchSource.makeTimerSource(queue: analysisQueue)
@@ -503,6 +532,16 @@ final class AudioSpectrumSampler {
         DispatchQueue.main.async {
             PulseModel.shared.running = false
             PulseModel.shared.frame.update(Array(repeating: 0, count: PulseModel.bandCount))
+        }
+    }
+
+    /// 关掉律动时释放 FFT。必须在 setupQueue 上、且 teardown 已停掉分析定时器之后调用。
+    private func releaseFFT() {
+        analysisQueue.sync {
+            if let setup = fftSetup {
+                vDSP_destroy_fftsetup(setup)
+                fftSetup = nil
+            }
         }
     }
 
@@ -668,9 +707,15 @@ final class AudioSpectrumSampler {
             if !sawOutputRunning {
                 outputRunningSince = now
                 sawOutputRunning = true
+                deafHealsClear = true
+                setupQueue.async { [weak self] in self?.deafHeals = 0 }
             }
         } else {
-            sawOutputRunning = false
+            if sawOutputRunning || !deafHealsClear {
+                sawOutputRunning = false
+                deafHealsClear = true
+                setupQueue.async { [weak self] in self?.deafHeals = 0 }
+            }
             return
         }
         guard now.timeIntervalSince(outputRunningSince) > 2.5 else { return }
@@ -678,10 +723,24 @@ final class AudioSpectrumSampler {
         let silentFor = now.timeIntervalSince(lastNonZeroAt)
         let stalled = ioAge > 2.5
         let deaf = silentFor > 2.5
-        guard stalled || deaf else { return }
-        let reason = stalled ? "正在播放,但抽头回调停了" : "正在播放,但抽头全是静音"
+        guard stalled || deaf else {
+            if !deafHealsClear {
+                deafHealsClear = true
+                setupQueue.async { [weak self] in self?.deafHeals = 0 }
+            }
+            return
+        }
+        if stalled {
+            setupQueue.async { [weak self] in
+                self?.scheduleRebuild(reason: "正在播放,但抽头回调停了", minimumInterval: 8)
+            }
+            return
+        }
+        // 回调还在、只是全 0。设备被占着但没有可听内容时也会这样。
+        // 每 8 秒拆一次抽头会把播放通路弄断,所以静音只试几次。
+        deafHealsClear = false
         setupQueue.async { [weak self] in
-            self?.scheduleRebuild(reason: reason, minimumInterval: 8)
+            self?.scheduleRebuild(reason: "正在播放,但抽头全是静音", minimumInterval: 8, forSilence: true)
         }
     }
 
